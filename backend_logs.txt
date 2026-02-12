@@ -1,0 +1,50 @@
+INFO:monetag_api:✅ MoneyTag API is properly configured
+INFO:monetag_api:MoneyTag Configuration: {'api_token_set': True, 'zone_id_set': True, 'publisher_id_set': True, 'api_base_url': 'https://publishers.monetag.com/api', 'status': 'ready'}
+[OK] Supabase client initialized: https://gtgnwrwbcxvasgetfzby.supabase.co
+🔌 Realtime Connection Manager initialized
+✅ Realtime Connection Manager started
+
+============================================================
+FLASK BACKEND STARTING
+============================================================
+Discord Channel ID: 1429488622956056626
+Bot Token: MTQy...3a60
+CORS enabled for frontend access
+Server: http://localhost:5000
+
+Available Endpoints:
+   LEGACY:
+   - GET  /get-url         : Fetch latest ngrok URL from Discord
+   - POST /generate        : Generate AI content via ComfyUI
+   - GET  /list-models     : List available AI models
+   - GET  /health          : Check backend status
+   - POST /clear-cache     : Clear cached URL
+
+   AUTHENTICATION:
+   - POST /auth/magic-link : Send magic link to email
+   - GET  /auth/verify     : Verify magic link token
+   - GET  /auth/me         : Get current user info
+   - POST /auth/logout     : Logout current user
+
+   JOBS:
+   - POST   /jobs          : Create new job
+   - GET    /jobs          : Get user's jobs
+   - GET    /jobs/<id>     : Get specific job
+   - PATCH  /jobs/<id>     : Update job status
+   - DELETE /jobs/<id>     : Cancel job
+   - GET    /jobs/stats    : Get job statistics
+
+   WORKER (Internal):
+   - GET  /worker/next-job       : Get next pending job
+   - POST /worker/job/<id>/complete : Mark job complete
+
+   MEGA STORAGE:
+   - POST /mega/upload-image     : Upload image to Mega cloud
+============================================================
+Debug mode enabled - all requests will be logged
+============================================================
+
+ * Serving Flask app 'app'
+ * Debug mode: off
+Address already in use
+Port 5000 is in use by another program. Either identify and stop that program, or start the server with a different port.

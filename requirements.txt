@@ -1,0 +1,33 @@
+Flask==3.0.0
+flask-cors==4.0.0
+requests==2.31.0
+python-dotenv-vault==0.6.3
+
+# Supabase (2.10.0+ required for async client / realtime support)
+supabase>=2.10.0
+postgrest>=0.16.0
+realtime>=2.0.0
+
+# Authentication & Security
+PyJWT==2.8.0
+bcrypt==4.1.2
+
+# Email
+resend==0.8.0
+
+# Utilities
+python-dateutil==2.8.2
+
+# Image Processing
+Pillow>=10.2.0
+
+# Cloudinary Cloud Storage
+cloudinary==1.36.0
+
+# AI/ML APIs
+replicate>=0.25.0
+fal-client>=0.4.0
+
+# Ngrok tunneling (optional)
+pyngrok>=7.0.0
+

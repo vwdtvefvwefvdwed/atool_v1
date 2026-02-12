@@ -1,0 +1,125 @@
+╔══════════════════════════════════════════════════════════════════════════╗
+║                    PROVIDER API KEYS QUICK REFERENCE                     ║
+╚══════════════════════════════════════════════════════════════════════════╝
+
+📋 BASIC COMMANDS
+═══════════════════════════════════════════════════════════════════════════
+
+  View All Providers:
+    python manage_provider_keys.py --list
+
+  View Specific Provider:
+    python manage_provider_keys.py --list --provider vision-nova
+
+  Add New Provider:
+    python manage_provider_keys.py --add
+    (Interactive - follow prompts)
+
+  Update Provider:
+    python manage_provider_keys.py --update <KEY_ID>
+    (Interactive - follow prompts)
+
+  Delete Provider:
+    python manage_provider_keys.py --delete <KEY_ID>
+
+  Activate Provider:
+    python manage_provider_keys.py --activate <KEY_ID>
+
+  Deactivate Provider:
+    python manage_provider_keys.py --deactivate <KEY_ID>
+
+  Set Priority:
+    python manage_provider_keys.py --set-priority <KEY_ID> <NUMBER>
+
+
+🎯 COMMON WORKFLOWS
+═══════════════════════════════════════════════════════════════════════════
+
+1️⃣  REPLACE PLACEHOLDER WITH REAL API KEY
+   ─────────────────────────────────────────
+   Step 1: python manage_provider_keys.py --list
+   Step 2: Copy the KEY_ID you want to update
+   Step 3: python manage_provider_keys.py --update <KEY_ID>
+   Step 4: Enter real API key and set active to 'y'
+
+
+2️⃣  ADD NEW PROVIDER (e.g., OpenAI)
+   ─────────────────────────────────
+   python manage_provider_keys.py --add
+
+   Provider key: openai
+   Provider name: OpenAI DALL-E 3
+   API Key: sk-proj-xxxxxxxxxxxx
+   API Secret: [press Enter]
+   Additional config: {"model": "dall-e-3"}
+   Priority: 100
+   Is active?: y
+
+
+3️⃣  ADD MULTIPLE KEYS FOR SAME PROVIDER (Load Balancing)
+   ──────────────────────────────────────────────────────
+   # Primary key
+   python manage_provider_keys.py --add
+   Provider key: openai
+   Priority: 100
+
+   # Backup key
+   python manage_provider_keys.py --add
+   Provider key: openai
+   Priority: 50
+
+
+4️⃣  TEMPORARILY DISABLE A PROVIDER
+   ──────────────────────────────────
+   python manage_provider_keys.py --deactivate <KEY_ID>
+
+   # Re-enable later
+   python manage_provider_keys.py --activate <KEY_ID>
+
+
+5️⃣  DELETE UNUSED PROVIDER
+   ─────────────────────────
+   python manage_provider_keys.py --delete <KEY_ID>
+   Confirm: yes
+
+
+📊 CURRENT PROVIDERS (from HomeNew.jsx)
+═══════════════════════════════════════════════════════════════════════════
+
+IMAGE PROVIDERS:
+  ├─ vision-nova    (Priority: 100) - Recommended
+  ├─ vision-atlas   (Priority: 90)
+  └─ vision-flux    (Priority: 80)
+
+VIDEO PROVIDERS:
+  ├─ cinematic-nova (Priority: 100)
+  ├─ cinematic-pro  (Priority: 90)
+  └─ cinematic-x    (Priority: 80)
+
+
+💡 TIPS
+═══════════════════════════════════════════════════════════════════════════
+
+  ✓ Use priority 100 for production keys
+  ✓ Use priority 50-90 for backup keys
+  ✓ Use priority <50 for testing keys
+  ✓ Keep placeholder keys INACTIVE (Active: No)
+  ✓ Use additional_config for endpoints, models, versions
+  ✓ Always set WORKER_1_SERVICE_ROLE_KEY in .env file
+
+
+⚙️  ENVIRONMENT SETUP
+═══════════════════════════════════════════════════════════════════════════
+
+  Required in .env file:
+    WORKER_1_URL=https://your-worker1-project.supabase.co
+    WORKER_1_SERVICE_ROLE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6...
+
+
+📖 FULL DOCUMENTATION
+═══════════════════════════════════════════════════════════════════════════
+
+  Read more: PROVIDER_KEYS_USAGE_GUIDE.md
+
+
+═══════════════════════════════════════════════════════════════════════════
