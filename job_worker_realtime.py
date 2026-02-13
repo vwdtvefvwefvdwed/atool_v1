@@ -20,6 +20,7 @@ from provider_api_keys import get_api_key_for_job, increment_usage_count, get_wo
 from api_key_rotation import handle_api_key_rotation, log_rotation_attempt
 from error_notifier import notify_error, ErrorType
 from model_quota_manager import ensure_quota_manager_started, get_quota_manager
+from cloudinary_manager import get_cloudinary_manager
 
 if sys.platform == "win32":
     try:
@@ -934,37 +935,30 @@ def process_image_job(job):
             "user_id": job.get("user_id", "")
         }
         
-        print(f"Uploading to Cloudinary...")
+        print(f"Uploading to Cloudinary (direct)...")
         try:
-            upload_response = requests.post(
-                f"{BACKEND_URL}/cloudinary/upload-image",
-                json={
-                    "image_data": base64.b64encode(image_data).decode('utf-8'),
-                    "file_name": f"job_{job_id}.png",
-                    "metadata": upload_metadata
-                },
-                timeout=60,
-                verify=VERIFY_SSL
+            cloudinary_manager = get_cloudinary_manager()
+            
+            upload_result = cloudinary_manager.upload_image_from_bytes(
+                image_bytes=image_data,
+                file_name=f"job_{job_id}.png",
+                folder_name="ai-generated-images",
+                metadata=upload_metadata
             )
             
-            print(f"[Cloudinary] Response status: {upload_response.status_code}")
-            
-            if upload_response.status_code != 200:
-                error_text = upload_response.text[:200] if upload_response.text else "No response body"
-                print(f"[Cloudinary] Error response: {error_text}")
+            if not upload_result.get("success"):
+                error_msg = upload_result.get("error", "Unknown error")
+                print(f"[Cloudinary] Upload failed: {error_msg}")
                 notify_error(
                     ErrorType.CLOUDINARY_UPLOAD_FAILED,
-                    f"Cloudinary image upload failed for job {job_id}",
-                    context={"job_id": job_id, "status_code": upload_response.status_code, "error": error_text}
+                    f"Cloudinary direct upload failed for job {job_id}",
+                    context={"job_id": job_id, "error": error_msg}
                 )
-                raise Exception(f"Cloudinary upload failed: {upload_response.status_code}")
+                raise Exception(f"Cloudinary upload failed: {error_msg}")
             
-            cloudinary_data = upload_response.json()
-            final_url = cloudinary_data.get('secure_url')
+            final_url = upload_result.get('secure_url')
+            print(f"[Cloudinary] Direct upload successful!")
             print(f"Uploaded: {final_url}")
-        except requests.exceptions.RequestException as req_error:
-            print(f"[Cloudinary] Request error: {str(req_error)}")
-            raise Exception(f"Cloudinary request failed: {str(req_error)}")
         except Exception as upload_error:
             print(f"[Cloudinary] Upload error: {str(upload_error)}")
             raise Exception(f"Cloudinary upload error: {str(upload_error)}")
