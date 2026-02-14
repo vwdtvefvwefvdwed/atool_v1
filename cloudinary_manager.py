@@ -14,7 +14,20 @@ import cloudinary.api
 import tempfile
 from pathlib import Path
 
-load_dotenv()
+# Load environment from vault (requires DOTENV_KEY env var in production)
+script_dir = Path(__file__).parent
+vault_path = script_dir / ".env.vault"
+dotenv_key = os.getenv("DOTENV_KEY")
+
+if vault_path.exists() and dotenv_key:
+    print(f"[CLOUDINARY MANAGER] Loading env from vault with DOTENV_KEY")
+    load_dotenv(vault_path)
+elif vault_path.exists():
+    print(f"[CLOUDINARY MANAGER] Warning: .env.vault exists but DOTENV_KEY not set, trying load anyway")
+    load_dotenv(vault_path)
+else:
+    print(f"[CLOUDINARY MANAGER] No .env.vault found, using system env vars")
+    load_dotenv()
 
 def sanitize_for_cloudinary(text):
     """
@@ -426,7 +439,8 @@ class CloudinaryManager:
                     upload_params["context"] = context_str
                     print(f"[CLOUDINARY MANAGER] Context string: {context_str[:100]}...")
             
-            # Upload with retry logic
+            # Upload with retry logic (add timeout to params)
+            upload_params["timeout"] = 120  # 2 minute timeout for upload
             upload_result = self.upload_with_retry(
                 cloudinary.uploader.upload,
                 image_path,
@@ -546,7 +560,8 @@ class CloudinaryManager:
                     upload_params["context"] = context_str
                     print(f"[CLOUDINARY MANAGER] Context string: {context_str[:100]}...")
             
-            # Upload with retry logic
+            # Upload with retry logic (add timeout to params)
+            upload_params["timeout"] = 300  # 5 minute timeout for video upload (larger files)
             upload_result = self.upload_with_retry(
                 cloudinary.uploader.upload,
                 video_path,

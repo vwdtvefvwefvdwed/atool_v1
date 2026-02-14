@@ -1,19 +1,23 @@
+# Docker ignore - only exclude dev/temp files
 __pycache__
 *.pyc
 *.pyo
 *.pyd
-.Python
-*.so
-*.egg
-*.egg-info
-dist
-build
-.env
-.git
-.gitignore
-*.md
-*.txt
-!requirements.txt
-backend_logs.txt
+.pytest_cache
+.coverage
+*.log
+*.txt.bak
 .vscode
 .idea
+
+# Keep .env.vault (encrypted, safe to include)
+# Exclude other env files
+.env
+.env.local
+.env.development
+.env.me
+!.env.vault
+
+.env*
+.flaskenv*
+!.env.project

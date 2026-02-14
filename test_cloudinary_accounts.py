@@ -3,10 +3,13 @@ Test script to verify Cloudinary account credentials
 """
 
 import os
+from pathlib import Path
 import requests
 from dotenv_vault import load_dotenv
 
-load_dotenv()
+# Load .env.vault from the same directory as this script
+script_dir = Path(__file__).parent
+load_dotenv(script_dir / ".env.vault")
 
 def test_cloudinary_account(name, cloud_name, api_key, api_secret):
     """Test a single Cloudinary account"""
