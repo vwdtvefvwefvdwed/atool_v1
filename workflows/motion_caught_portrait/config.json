@@ -1,0 +1,51 @@
+{
+  "id": "motion-caught-portrait",
+  "name": "Motion-Caught Portrait (4x Upscale)",
+  "description": "Transform your photo into a trending candid motion-turn lifestyle portrait with natural energy + fast 4x upscale (2 credits)",
+  "icon": "🎯",
+  "category": "transform",
+  "preview_video": null,
+  "preview_thumbnail": null,
+  "enabled": true,
+  "default_prompts": {
+    "image_edit": "Use Image A as a high-fidelity facial reference for likeness and fine features (not strict identity lock). Generate a true photorealistic modern lifestyle portrait in a creative trending motion-turn candid pose — mid-torso framing, subject captured while naturally turning toward the camera as if someone just called their name, torso still in motion with slight twist, one hand adjusting collar, watch, or glasses, hair showing subtle movement, expression warm and spontaneous with a half-smile. Do NOT use a static or symmetrical pose; enforce dynamic body twist, uneven shoulder height, and natural motion energy. Keep a normal everyday theme with simple modern casual clothing, minimal styling, realistic fabric folds, and natural grooming. Place in a real urban or outdoor setting with foreground elements (rail, doorway, café table edge, or wall corner) to add depth, with soft background bokeh and shallow depth of field. Preserve accurate facial proportions, eye shape, skin texture, and head-to-shoulder scale from Image A with seamless blending, consistent skin tone, correct lighting direction, and realistic contact shadows. Use natural daylight, candid street-photography style, 50–85mm lens look, realistic color grading, ultra-detailed, HDR, sharp focus on the eyes, no cinematic movie theme, no costume, no fantasy, no stylization, no cartoon or plastic skin, no AI artifacts.",
+    "upscale": "Ultra high-resolution photorealistic candid lifestyle portrait, sharp focus, intricate details, natural skin texture, 8K, HDR"
+  },
+  "supported_models": {
+    "image_edit": [
+      "nano-banana-pro-leonardo"
+    ],
+    "upscale": [
+      "stability-upscale-fast"
+    ]
+  },
+  "steps": [
+    {
+      "id": 0,
+      "name": "upload",
+      "type": "input",
+      "description": "Upload your input image",
+      "required_input": "image"
+    },
+    {
+      "id": 1,
+      "name": "image_edit",
+      "type": "generation",
+      "description": "AI-powered motion-caught portrait transformation",
+      "model_type": "image",
+      "default_model": "nano-banana-pro-leonardo",
+      "provider": "vision-leonardo"
+    },
+    {
+      "id": 2,
+      "name": "upscale",
+      "type": "generation",
+      "description": "Fast 4x upscale with Stability AI (2 credits)",
+      "model_type": "image",
+      "default_model": "stability-upscale-fast",
+      "provider": "vision-stabilityai"
+    }
+  ],
+  "estimated_duration_seconds": 60,
+  "credits_cost": 27
+}

@@ -18,6 +18,7 @@ load_dotenv()
 # Configuration
 JWT_SECRET = os.getenv("JWT_SECRET")
 EMAIL_FROM = os.getenv("EMAIL_FROM", "noreply@yourdomain.com")
+EMAIL_FROM_BACKUP = os.getenv("EMAIL_FROM_BACKUP", EMAIL_FROM)
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 
 
@@ -171,6 +172,7 @@ Ashel-Free AI Studio
         if resend_manager.handle_resend_error(e):
             print("[RESEND] Retrying with backup API key...")
             try:
+                email_params["from"] = f"Ashel-Free AI Studio <{EMAIL_FROM_BACKUP}>"
                 resend.Emails.send(email_params)
                 print(f"[OK] Magic link sent via backup account: {email}")
                 return {

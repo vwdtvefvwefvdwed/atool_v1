@@ -1,0 +1,51 @@
+{
+  "id": "crosshatch-girl-study",
+  "name": "Crosshatch Girl Study (4x Upscale)",
+  "description": "Transform your photo into a detailed pencil and charcoal line sketch portrait with expressive hand-drawn artistry + fast 4x upscale (2 credits)",
+  "icon": "🖋️",
+  "category": "transform",
+  "preview_video": null,
+  "preview_thumbnail": null,
+  "enabled": true,
+  "default_prompts": {
+    "image_edit": "Use Image A as a high-fidelity facial reference for likeness and fine features (not strict identity lock). Generate a highly detailed pencil and charcoal line sketch portrait of a young woman — head-and-shoulders framing, gentle forward-facing pose with a slight head tilt, soft natural smile, large expressive eyes, and calm warm expression. Enforce traditional hand-drawn style with visible graphite and charcoal strokes, layered cross-hatching, bold and fine line variation, and tonal depth built only through sketch shading. Hair should appear voluminous and slightly messy with many individually drawn strands and directional pencil flow. Do NOT use photorealistic rendering, smooth digital airbrushing, vector lines, or color painting; enforce organic paper sketch texture and natural drawing imperfections. Clothing should be lightly suggested with fantasy-inspired simple fabric shapes and minimal detail, keeping focus on the face. Background should be a light warm paper tone with soft vignette and no hard scene elements. Preserve accurate facial proportions, eye shape, lips, and bone structure from Image A while translating into charcoal-pencil illustration form. Ultra-detailed, art-studio quality, clean composition, no blur, no color fill, no cartoon style, no plastic skin, no AI artifacts.",
+    "upscale": "Ultra high-resolution charcoal pencil sketch portrait, fine cross-hatching strokes, expressive tonal shading, paper grain texture, art-studio quality, 8K, HDR"
+  },
+  "supported_models": {
+    "image_edit": [
+      "nano-banana-pro-leonardo"
+    ],
+    "upscale": [
+      "stability-upscale-fast"
+    ]
+  },
+  "steps": [
+    {
+      "id": 0,
+      "name": "upload",
+      "type": "input",
+      "description": "Upload your input image",
+      "required_input": "image"
+    },
+    {
+      "id": 1,
+      "name": "image_edit",
+      "type": "generation",
+      "description": "AI-powered crosshatch girl study transformation",
+      "model_type": "image",
+      "default_model": "nano-banana-pro-leonardo",
+      "provider": "vision-leonardo"
+    },
+    {
+      "id": 2,
+      "name": "upscale",
+      "type": "generation",
+      "description": "Fast 4x upscale with Stability AI (2 credits)",
+      "model_type": "image",
+      "default_model": "stability-upscale-fast",
+      "provider": "vision-stabilityai"
+    }
+  ],
+  "estimated_duration_seconds": 60,
+  "credits_cost": 27
+}

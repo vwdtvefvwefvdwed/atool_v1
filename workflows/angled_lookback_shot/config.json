@@ -1,0 +1,51 @@
+{
+  "id": "angled-lookback-shot",
+  "name": "Angled Lookback Shot (4x Upscale)",
+  "description": "Transform your photo into a trending 3/4 profile look-back portrait with natural lifestyle feel + fast 4x upscale (2 credits)",
+  "icon": "📸",
+  "category": "transform",
+  "preview_video": null,
+  "preview_thumbnail": null,
+  "enabled": true,
+  "default_prompts": {
+    "image_edit": "Use Image A as a high-fidelity facial reference for likeness and fine features (not strict identity lock). Generate a true photorealistic modern lifestyle portrait in a trending 3/4 profile look-back pose — chest-up framing, body turned 45–60 degrees away from the camera, head turned back toward the lens, eyes looking at camera, natural confident expression. Do NOT use a front-facing pose. Keep a normal everyday theme with simple casual clothing (plain t-shirt or shirt), minimal styling, clean haircut, realistic hair strand detail. Use a candid outdoor or café street environment with soft background bokeh and shallow depth of field. Preserve accurate facial proportions, skin texture, and head-to-shoulder scale from Image A with seamless blending, matching skin tone, correct lighting direction, and natural contact shadows. Shot with an 85mm portrait lens look, natural daylight, realistic color grading, ultra-detailed, HDR, sharp focus on the eyes, no cinematic movie theme, no costume, no armor, no fantasy, no stylization, no cartoon or plastic skin. Also enforce side-angle body orientation and visible nose bridge silhouette to guarantee a profile-style result.",
+    "upscale": "Ultra high-resolution photorealistic lifestyle portrait, sharp focus, intricate details, natural skin texture, 8K, HDR"
+  },
+  "supported_models": {
+    "image_edit": [
+      "nano-banana-pro-leonardo"
+    ],
+    "upscale": [
+      "stability-upscale-fast"
+    ]
+  },
+  "steps": [
+    {
+      "id": 0,
+      "name": "upload",
+      "type": "input",
+      "description": "Upload your input image",
+      "required_input": "image"
+    },
+    {
+      "id": 1,
+      "name": "image_edit",
+      "type": "generation",
+      "description": "AI-powered angled lookback portrait transformation",
+      "model_type": "image",
+      "default_model": "nano-banana-pro-leonardo",
+      "provider": "vision-leonardo"
+    },
+    {
+      "id": 2,
+      "name": "upscale",
+      "type": "generation",
+      "description": "Fast 4x upscale with Stability AI (2 credits)",
+      "model_type": "image",
+      "default_model": "stability-upscale-fast",
+      "provider": "vision-stabilityai"
+    }
+  ],
+  "estimated_duration_seconds": 60,
+  "credits_cost": 27
+}

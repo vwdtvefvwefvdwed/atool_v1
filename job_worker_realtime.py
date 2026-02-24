@@ -12,6 +12,7 @@ import threading
 import requests
 import logging
 from datetime import datetime
+from typing import Optional
 from flask import Flask, jsonify
 from dotenv_vault import load_dotenv
 from postgrest.exceptions import APIError
@@ -21,6 +22,7 @@ from api_key_rotation import handle_api_key_rotation, log_rotation_attempt
 from error_notifier import notify_error, ErrorType
 from model_quota_manager import ensure_quota_manager_started, get_quota_manager
 from cloudinary_manager import get_cloudinary_manager
+from job_coordinator import get_job_coordinator
 
 if sys.platform == "win32":
     try:
@@ -98,6 +100,54 @@ ping_all_workers_async()
 # Initialize quota manager
 ensure_quota_manager_started()
 print("[QUOTA] Quota manager initialized")
+
+MODELS_REQUIRING_INPUT_IMAGE = [
+    'nano-banana-pro-leonardo',
+    'AP123/IllusionDiffusion',
+    'ultra-fast-nano',
+    'ultra-fast-nano-banana-2',
+    'black-forest-labs/flux-kontext-pro',
+    'topazlabs/image-upscale',
+    'sczhou/codeformer',
+    'tencentarc/gfpgan',
+    'remove-bg',
+    'bria_gen_fill',
+    'bria_erase',
+    'bria_remove_background',
+    'bria_replace_background',
+    'bria_blur_background',
+    'bria_erase_foreground',
+    'bria_expand',
+    'bria_enhance',
+    'stability-upscale-fast',
+]
+
+MODELS_REQUIRING_INPUT_VIDEO = [
+    'luma/reframe-video',
+]
+
+MODELS_REQUIRING_INPUT_IMAGE_FOR_VIDEO = [
+    'minimax/video-01',
+    'kling-2.6',
+    'motion-2.0',
+    'motion-2.0-fast',
+    'hailuo-2.3-fast',
+]
+
+# Priority lock - when True, only Priority 1 jobs are processed
+_priority_lock_active = False
+
+def _load_priority_lock_from_db():
+    """Load priority_lock flag from Supabase on startup"""
+    global _priority_lock_active
+    try:
+        from supabase_client import supabase
+        result = supabase.table("system_flags").select("value").eq("key", "priority_lock").single().execute()
+        if result.data:
+            _priority_lock_active = result.data.get("value", False)
+            print(f"[PRIORITY LOCK] Loaded from DB: {'ACTIVE - only P1 jobs will run' if _priority_lock_active else 'inactive'}")
+    except Exception as e:
+        print(f"[PRIORITY LOCK] Could not load flag from DB (defaulting to inactive): {e}")
 
 # Provider-level concurrency control
 provider_active_jobs = {}
@@ -261,15 +311,39 @@ def mark_job_failed(job_id, error_message):
         return False
 
 
+MAX_PENDING_RETRIES = 5
+
+
 def reset_job_to_pending(job_id, provider_key, error_message):
     """
     Mark a job as pending in the database so it can be retried.
-    Handles edge cases where provider_key is None or reset fails.
+    After MAX_PENDING_RETRIES attempts, marks the job as permanently failed
+    to prevent infinite pending loops caused by persistent API errors.
     """
     if not job_id:
         print(f"[RESET] Cannot reset job: job_id is missing")
         return False
-    
+
+    try:
+        supabase = get_worker1_client()
+        if supabase:
+            job_resp = supabase.table("jobs").select("metadata").eq("job_id", job_id).execute()
+            if job_resp.data:
+                meta = job_resp.data[0].get("metadata") or {}
+                retry_count = meta.get("pending_retry_count", 0)
+                if retry_count >= MAX_PENDING_RETRIES:
+                    print(f"[RESET] Job {job_id} has reached MAX_PENDING_RETRIES ({MAX_PENDING_RETRIES}) - marking as FAILED")
+                    mark_job_failed(
+                        job_id,
+                        f"Job failed after {MAX_PENDING_RETRIES} retry attempts. Last error: {error_message}"
+                    )
+                    return False
+                meta["pending_retry_count"] = retry_count + 1
+                supabase.table("jobs").update({"metadata": meta}).eq("job_id", job_id).execute()
+                print(f"[RESET] Job {job_id} pending retry {retry_count + 1}/{MAX_PENDING_RETRIES}")
+    except Exception as count_err:
+        print(f"[RESET] Warning: could not check retry count for job {job_id}: {count_err}")
+
     print(f"[RESET] Marking job {job_id} as pending...")
     
     try:
@@ -306,6 +380,161 @@ def reset_job_to_pending(job_id, provider_key, error_message):
         return False
 
 
+def _extract_valid_url(value) -> Optional[str]:
+    """
+    Extract the first valid HTTP URL from a checkpoint output value.
+    - If value is a URL string  → return it directly.
+    - If value is a dict        → return the first string value that starts with 'http'.
+    - Otherwise                 → return None.
+    """
+    if isinstance(value, str) and value.startswith("http"):
+        return value
+    if isinstance(value, dict):
+        for v in value.values():
+            if isinstance(v, str) and v.startswith("http"):
+                return v
+    return None
+
+
+def validate_job_inputs(job) -> bool:
+    """
+    Validate that a job has all required inputs before dispatching it.
+
+    Image / video jobs
+    ------------------
+    Checks model-specific required input image / video URLs.
+
+    Workflow pending
+    ----------------
+    The original user-uploaded image (jobs.image_url or metadata.input_image_url)
+    must be a valid HTTP URL.
+
+    Workflow pending_retry (step N fails, resume from step N)
+    ---------------------------------------------------------
+    The INPUT for step N is the LAST OUTPUT from step N-1.
+    - step 0 : input is the original user image  → checkpoints['_input'] / jobs.image_url
+    - step N>0: input is the generated image     → checkpoints[N-1]['output'] (dict or URL)
+
+    In both cases the value must resolve to a real HTTP URL — a non-None dict
+    with all-None URL fields is treated the same as missing.
+
+    Marks the job as FAILED immediately when inputs are missing and returns False.
+    Returns True when the job is safe to submit.
+    """
+    job_id = job.get("job_id") or job.get("id")
+    job_type = job.get("job_type", "image")
+    model = job.get("model", "")
+    metadata = job.get("metadata", {}) or {}
+
+    # ── Image / Video jobs ────────────────────────────────────────────────────
+    if job_type in ("image", "video"):
+        input_image_url = metadata.get("input_image_url") or job.get("image_url")
+        input_video_url = metadata.get("video_url") or metadata.get("input_image_url")
+
+        if model in MODELS_REQUIRING_INPUT_IMAGE and not input_image_url:
+            msg = ("⚠️ This tool requires an input image. "
+                   "Please upload a reference image and try again.")
+            print(f"[VALIDATE] Job {job_id} missing required input image for model '{model}'")
+            mark_job_failed(job_id, msg)
+            return False
+
+        if model in MODELS_REQUIRING_INPUT_VIDEO and not input_video_url:
+            msg = ("⚠️ This tool requires an input video. "
+                   "Please upload a video and try again.")
+            print(f"[VALIDATE] Job {job_id} missing required input video for model '{model}'")
+            mark_job_failed(job_id, msg)
+            return False
+
+        if model in MODELS_REQUIRING_INPUT_IMAGE_FOR_VIDEO and not input_image_url:
+            msg = ("⚠️ This video tool requires an input image. "
+                   "Please upload a reference image and try again.")
+            print(f"[VALIDATE] Job {job_id} missing required input image for video model '{model}'")
+            mark_job_failed(job_id, msg)
+            return False
+
+        return True
+
+    # ── Workflow jobs ─────────────────────────────────────────────────────────
+    if job_type == "workflow":
+        status = job.get("status", "pending")
+
+        if status == "pending":
+            raw = job.get("image_url") or metadata.get("input_image_url")
+            if not _extract_valid_url(raw):
+                msg = ("⚠️ No input image was found for this workflow. "
+                       "Please try again with a new image.")
+                print(f"[VALIDATE] Workflow job {job_id} missing original input image")
+                mark_job_failed(job_id, msg)
+                return False
+            return True
+
+        if status == "pending_retry":
+            try:
+                from supabase_client import supabase
+
+                exec_resp = supabase.table("workflow_executions")\
+                    .select("current_step, checkpoints")\
+                    .eq("job_id", job_id)\
+                    .single()\
+                    .execute()
+
+                if not exec_resp.data:
+                    msg = ("⚠️ Workflow execution record not found. "
+                           "Please try submitting again.")
+                    print(f"[VALIDATE] Workflow job {job_id} has no execution record")
+                    mark_job_failed(job_id, msg)
+                    return False
+
+                current_step = exec_resp.data.get("current_step", 0)
+                checkpoints = exec_resp.data.get("checkpoints", {}) or {}
+
+                if current_step == 0:
+                    # Step 0 input = original user-uploaded image
+                    raw = (
+                        checkpoints.get("_input") or
+                        job.get("image_url") or
+                        metadata.get("input_image_url")
+                    )
+                    input_url = _extract_valid_url(raw)
+                    if not input_url:
+                        msg = ("⚠️ The original input image for this workflow could not be "
+                               "found. Please try again with a new image.")
+                        print(f"[VALIDATE] Workflow job {job_id}: missing/invalid original "
+                              f"input image at step 0 resume (got: {raw!r})")
+                        mark_job_failed(job_id, msg)
+                        return False
+
+                else:
+                    # Step N>0 input = LAST OUTPUT from step N-1 (the generated image)
+                    prev_checkpoint = checkpoints.get(str(current_step - 1))
+                    if not isinstance(prev_checkpoint, dict):
+                        msg = ("⚠️ The output from a previous workflow step is missing. "
+                               "Please try again.")
+                        print(f"[VALIDATE] Workflow job {job_id}: no checkpoint record for "
+                              f"step {current_step - 1} (needed as input for step {current_step})")
+                        mark_job_failed(job_id, msg)
+                        return False
+
+                    prev_output = prev_checkpoint.get("output")
+                    last_output_url = _extract_valid_url(prev_output)
+
+                    if not last_output_url:
+                        msg = ("⚠️ The generated image from a previous workflow step is "
+                               "missing or invalid. Please try again.")
+                        print(f"[VALIDATE] Workflow job {job_id}: checkpoint output for "
+                              f"step {current_step - 1} has no valid URL "
+                              f"(got: {prev_output!r}) — cannot use as input for step {current_step}")
+                        mark_job_failed(job_id, msg)
+                        return False
+
+            except Exception as e:
+                print(f"[VALIDATE] Error validating workflow job {job_id}: {e} — allowing anyway")
+
+        return True
+
+    return True
+
+
 def retry_transient_errors():
     """
     Retry pending jobs that failed with transient errors (Cloudinary, network, timeout, or no API key).
@@ -320,22 +549,13 @@ def retry_transient_errors():
             return
         
         # Query pending jobs with error messages
-        try:
-            result = supabase.table("image_generation_requests") \
-                .select("id, model, error_message, created_at") \
-                .eq("status", "pending") \
-                .not_.is_("error_message", "null") \
-                .order("created_at", desc=False) \
-                .limit(50) \
-                .execute()
-        except APIError as api_err:
-            error_data = api_err.args[0] if api_err.args else {}
-            if isinstance(error_data, dict):
-                error_code = error_data.get('code', '')
-                if error_code == 'PGRST205':
-                    print(f"[RETRY] Table not found in schema cache, skipping retry check")
-                    return
-            raise
+        result = supabase.table("jobs") \
+            .select("job_id, model, error_message, created_at") \
+            .eq("status", "pending") \
+            .not_.is_("error_message", "null") \
+            .order("created_at", desc=False) \
+            .limit(50) \
+            .execute()
         
         jobs = result.data if result and hasattr(result, 'data') else []
         
@@ -363,24 +583,22 @@ def retry_transient_errors():
             
             if is_transient:
                 retryable_count += 1
-                print(f"[RETRY] Retrying job {job['id']} ({job.get('model')}) - Error: {job.get('error_message', 'Unknown')[:80]}")
+                print(f"[RETRY] Retrying job {job['job_id']} ({job.get('model')}) - Error: {job.get('error_message', 'Unknown')[:80]}")
                 
                 # Fetch full job data and trigger processing
                 try:
-                    full_job_result = supabase.table("image_generation_requests") \
+                    full_job_result = supabase.table("jobs") \
                         .select("*") \
-                        .eq("id", job["id"]) \
+                        .eq("job_id", job["job_id"]) \
                         .single() \
                         .execute()
                     
                     if full_job_result and hasattr(full_job_result, 'data') and full_job_result.data:
                         on_new_job({"record": full_job_result.data})
                     else:
-                        print(f"[RETRY] Could not fetch full job data for {job['id']}")
-                except APIError as api_err:
-                    error_data = api_err.args[0] if api_err.args else {}
-                    error_msg = error_data.get('message', str(error_data)) if isinstance(error_data, dict) else str(error_data)
-                    print(f"[RETRY] API error fetching job {job['id']}: {error_msg}")
+                        print(f"[RETRY] Could not fetch full job data for {job['job_id']}")
+                except Exception as api_err:
+                    print(f"[RETRY] API error fetching job {job['job_id']}: {api_err}")
         
         if retryable_count > 0:
             print(f"[RETRY] Triggered retry for {retryable_count} jobs with transient errors")
@@ -435,10 +653,10 @@ def on_new_job(payload):
 
 def process_job_with_concurrency_control(job):
     """
-    Wrapper for process_job that enforces per-provider concurrency limits
-    - Checks if provider is busy
-    - Queues job if busy
-    - Processes immediately if available
+    Wrapper for process_job that enforces model-based job coordination
+    - Checks with coordinator if job can start
+    - Queues job if model conflict detected
+    - Processes immediately if no conflict
     """
     job_id = job.get("job_id") or job.get("id")
     
@@ -448,14 +666,51 @@ def process_job_with_concurrency_control(job):
     if maintenance_flag.exists():
         print(f"[MAINTENANCE] Skipping job {job_id} - maintenance mode active")
         return None
-    
-    # Determine provider
-    metadata = job.get("metadata", {})
-    provider_key = metadata.get("provider_key") or job.get("provider_key")
+
+    # Check priority lock mode - only allow Priority 1 jobs
+    if _priority_lock_active:
+        metadata = job.get("metadata") or {}
+        priority = metadata.get("priority", 1)
+        if priority not in [None, 1]:
+            print(f"[PRIORITY LOCK] Skipping priority {priority} job {job_id} - lock active, only P1 allowed")
+            return None
+
+    # Determine job type and model
+    job_type = job.get("job_type", "image")
     model = job.get("model", "")
     
+    # Extract required models
+    coordinator = get_job_coordinator()
+    
+    if job_type == "workflow":
+        # For workflows, we need to get the workflow config
+        # For now, skip coordinator for workflows (will be handled by workflow_manager)
+        print(f"[COORDINATOR] Workflow job {job_id} - skipping coordinator check (handled by workflow_manager)")
+        required_models = []
+    else:
+        # Normal job - single model
+        required_models = [model] if model else []
+    
+    # Only use coordinator for non-workflow jobs with models
+    if required_models:
+        print(f"[COORDINATOR] Checking if job {job_id} can start - Models: {required_models}")
+        
+        # Check with coordinator
+        start_result = coordinator.on_job_start(job_id, "normal", required_models)
+        
+        if not start_result['allowed']:
+            # Job is blocked - coordinator has already marked it as queued
+            print(f"[COORDINATOR] Job {job_id} blocked: {start_result['reason']}")
+            print(f"[COORDINATOR] Job will be automatically processed when blocking job completes")
+            return None
+        
+        print(f"[COORDINATOR] Job {job_id} allowed to start: {start_result['reason']}")
+    
+    # Determine provider (legacy concurrency control - can be removed later)
+    metadata = job.get("metadata", {})
+    provider_key = metadata.get("provider_key") or job.get("provider_key")
+    
     if not provider_key:
-        job_type = job.get("job_type", "image")
         video_indicators = ["video", "wan", "minimax", "luma", "topaz"]
         if job_type == "image" and any(v in model.lower() for v in video_indicators):
             job_type = "video"
@@ -467,14 +722,23 @@ def process_job_with_concurrency_control(job):
         if is_provider_busy(provider_key):
             print(f"[CONCURRENCY] Provider {provider_key} is BUSY, queueing job {job_id}")
             enqueue_job(provider_key, job)
+            # Clear coordinator state if we're not processing
+            if required_models:
+                coordinator.clear_active_job()
             return None
         else:
             mark_provider_busy(provider_key, job_id)
     
     try:
-        return process_job(job)
+        result = process_job(job)
+        return result
     finally:
         mark_provider_free(provider_key, job_id)
+        
+        # Notify coordinator that job completed
+        if required_models:
+            print(f"[COORDINATOR] Job {job_id} completed, checking for next queued job...")
+            coordinator.on_job_complete(job_id, "normal")
 
 
 def process_job(job):
@@ -559,6 +823,18 @@ def process_video_job(job):
         provider_key = metadata.get("provider_key") or job.get("provider_key")
         
         job_model = job.get("model", "minimax/video-01")
+        
+        if job_model in MODELS_REQUIRING_INPUT_IMAGE_FOR_VIDEO and not input_image_url:
+            print(f"[MISSING INPUT IMAGE] Video model {job_model} requires an input image but none was provided")
+            print(f"[MISSING INPUT IMAGE] Marking job {job_id} as FAILED")
+            mark_job_failed(job_id, "⚠️ This video tool requires an input image. Please upload a reference image and try again.")
+            return
+        
+        if job_model in MODELS_REQUIRING_INPUT_VIDEO and not input_image_url:
+            print(f"[MISSING INPUT VIDEO] Model {job_model} requires an input video but none was provided")
+            print(f"[MISSING INPUT VIDEO] Marking job {job_id} as FAILED")
+            mark_job_failed(job_id, "⚠️ This tool requires an input video. Please upload a video and try again.")
+            return
         
         if not provider_key:
             provider_key = map_model_to_provider(job_model, job_type="video")
@@ -690,29 +966,34 @@ def process_video_job(job):
             except:
                 pass
         
-        requests.post(
+        complete_response = requests.post(
             f"{BACKEND_URL}/worker/job/{job_id}/complete",
             json={"image_url": final_url, "video_url": final_url, "success": True},
             timeout=10,
             verify=VERIFY_SSL
         )
         
-        if api_key_id:
-            increment_usage_count(api_key_id)
-        
-        # Increment quota after successful completion
-        from model_quota_manager import get_quota_manager
-        quota_manager = get_quota_manager()
-        job_model = job.get("model", "minimax/video-01")
-        print(f"[QUOTA] Incrementing after completion - provider_key='{provider_key}', model='{job_model}'")
-        quota_result = quota_manager.increment_quota(provider_key, job_model)
-        if quota_result.get('success'):
-            print(f"[QUOTA] ✓ Successfully incremented quota for {provider_key}:{job_model}")
+        if complete_response.status_code == 200:
+            print(f"Video job {job_id} completed successfully!")
+            worker_status["jobs_processed"] += 1
+            
+            if api_key_id:
+                increment_usage_count(api_key_id)
+            
+            # Increment quota after successful completion
+            from model_quota_manager import get_quota_manager
+            quota_manager = get_quota_manager()
+            job_model = job.get("model", "minimax/video-01")
+            print(f"[QUOTA] Incrementing after completion - provider_key='{provider_key}', model='{job_model}'")
+            quota_result = quota_manager.increment_quota(provider_key, job_model)
+            if quota_result.get('success'):
+                print(f"[QUOTA] ✓ Successfully incremented quota for {provider_key}:{job_model}")
+            else:
+                print(f"[QUOTA] ✗ Failed to increment: {quota_result.get('reason', 'unknown')}")
         else:
-            print(f"[QUOTA] ✗ Failed to increment: {quota_result.get('reason', 'unknown')}")
-        
-        print(f"Video job {job_id} completed successfully!")
-        worker_status["jobs_processed"] += 1
+            error_msg = f"Failed to mark job complete: {complete_response.status_code} - {complete_response.text[:200]}"
+            print(f"[COMPLETION ERROR] {error_msg}")
+            raise Exception(error_msg)
         
     except Exception as e:
         error_message = str(e)
@@ -726,7 +1007,16 @@ def process_video_job(job):
         # - ALL OTHER ERRORS: Reset to PENDING for retry
         # ========================================================================
         
-        is_cloudinary_error = "cloudinary" in error_message.lower()
+        is_image_format_error = "INVALID_IMAGE_FORMAT:" in error_message
+        is_image_not_supported_error = "IMAGE_NOT_SUPPORTED:" in error_message
+
+        is_completion_error = "failed to mark job complete" in error_message.lower()
+        is_input_image_error = (
+            "failed to upload reference images to leonardo" in error_message.lower() or
+            "failed to upload input image to leonardo" in error_message.lower() or
+            "failed to download input image" in error_message.lower()
+        )
+        is_cloudinary_error = "cloudinary" in error_message.lower() and not is_input_image_error
         is_timeout_error = any(x in error_message.lower() for x in ["timeout", "timed out", "read timeout", "connection timeout"])
         is_network_error = any(x in error_message.lower() for x in ["connection", "httpsconnectionpool", "unable to connect", "network", "unreachable"])
         
@@ -740,6 +1030,33 @@ def process_video_job(job):
             ("requires key_points parameter" in error_message.lower()) or
             ("requires an input image" in error_message.lower())
         )
+
+        if is_image_format_error:
+            print(f"[IMAGE FORMAT ERROR] Unsupported image format detected - NOT rotating API key")
+            user_message = error_message.split("INVALID_IMAGE_FORMAT:", 1)[-1].strip()
+            print(f"[IMAGE FORMAT ERROR] Marking job {job_id} as FAILED (not retryable): {user_message}")
+            mark_job_failed(job_id, f"⚠️ {user_message}")
+            return
+
+        if is_image_not_supported_error:
+            print(f"[IMAGE NOT SUPPORTED] Image input not supported by this endpoint - NOT rotating API key")
+            user_message = error_message.split("IMAGE_NOT_SUPPORTED:", 1)[-1].strip()
+            print(f"[IMAGE NOT SUPPORTED] Marking job {job_id} as FAILED (not retryable): {user_message}")
+            mark_job_failed(job_id, f"⚠️ {user_message}")
+            return
+
+        if is_completion_error:
+            print(f"[COMPLETION ERROR] Job completion API call failed - marking as FAILED to prevent reprocessing")
+            print(f"[COMPLETION ERROR] Video was already generated but DB update failed")
+            print(f"[COMPLETION ERROR] Error: {error_message}")
+            mark_job_failed(job_id, f"COMPLETION_FAILED: Video generated but status update failed - {error_message}")
+            return
+        
+        if is_input_image_error:
+            print(f"[INPUT IMAGE ERROR] User input image could not be fetched/uploaded - NOT rotating API key")
+            print(f"[INPUT IMAGE ERROR] Marking job {job_id} as FAILED (not retryable)")
+            mark_job_failed(job_id, "⚠️ Your uploaded image could not be loaded. Please re-upload your image and try again.")
+            return
         
         if is_cloudinary_error:
             print(f"[CLOUDINARY ERROR] Cloudinary upload error detected - NOT rotating API key")
@@ -824,6 +1141,12 @@ def process_image_job(job):
         input_image_url = metadata.get("input_image_url") or job.get("image_url")
         mask_url = metadata.get("mask_url")
         provider_key = metadata.get("provider_key") or job.get("provider_key")
+        
+        if model_name in MODELS_REQUIRING_INPUT_IMAGE and not input_image_url:
+            print(f"[MISSING INPUT IMAGE] Model {model_name} requires an input image but none was provided")
+            print(f"[MISSING INPUT IMAGE] Marking job {job_id} as FAILED")
+            mark_job_failed(job_id, "⚠️ This tool requires an input image. Please upload a reference image and try again.")
+            return
         
         if not provider_key:
             provider_key = map_model_to_provider(model_name, job_type="image")
@@ -986,7 +1309,9 @@ def process_image_job(job):
             else:
                 print(f"[QUOTA] ✗ Failed to increment: {quota_result.get('reason', 'unknown')}")
         else:
-            print(f"Failed to mark job complete: {complete_response.status_code}")
+            error_msg = f"Failed to mark job complete: {complete_response.status_code} - {complete_response.text[:200]}"
+            print(f"[COMPLETION ERROR] {error_msg}")
+            raise Exception(error_msg)
             
     except Exception as e:
         error_message = str(e)
@@ -1003,8 +1328,17 @@ def process_image_job(job):
         
         # Check for Remove.bg foreground detection error (user-facing, non-retryable)
         is_removebg_foreground_error = "REMOVEBG_FOREGROUND_ERROR" in error_message
-        
-        is_cloudinary_error = "cloudinary" in error_message.lower()
+
+        is_image_format_error = "INVALID_IMAGE_FORMAT:" in error_message
+        is_image_not_supported_error = "IMAGE_NOT_SUPPORTED:" in error_message
+
+        is_completion_error = "failed to mark job complete" in error_message.lower()
+        is_input_image_error = (
+            "failed to upload reference images to leonardo" in error_message.lower() or
+            "failed to upload input image to leonardo" in error_message.lower() or
+            "failed to download input image" in error_message.lower()
+        )
+        is_cloudinary_error = "cloudinary" in error_message.lower() and not is_input_image_error
         is_timeout_error = any(x in error_message.lower() for x in ["timeout", "timed out", "read timeout", "connection timeout"])
         is_network_error = any(x in error_message.lower() for x in ["connection", "httpsconnectionpool", "unable to connect", "network", "unreachable"])
         
@@ -1018,7 +1352,21 @@ def process_image_job(job):
             ("requires key_points parameter" in error_message.lower()) or
             ("requires an input image" in error_message.lower())
         )
-        
+
+        if is_image_format_error:
+            print(f"[IMAGE FORMAT ERROR] Unsupported image format detected - NOT rotating API key")
+            user_message = error_message.split("INVALID_IMAGE_FORMAT:", 1)[-1].strip()
+            print(f"[IMAGE FORMAT ERROR] Marking job {job_id} as FAILED (not retryable): {user_message}")
+            mark_job_failed(job_id, f"⚠️ {user_message}")
+            return
+
+        if is_image_not_supported_error:
+            print(f"[IMAGE NOT SUPPORTED] Image input not supported by this endpoint - NOT rotating API key")
+            user_message = error_message.split("IMAGE_NOT_SUPPORTED:", 1)[-1].strip()
+            print(f"[IMAGE NOT SUPPORTED] Marking job {job_id} as FAILED (not retryable): {user_message}")
+            mark_job_failed(job_id, f"⚠️ {user_message}")
+            return
+
         if is_removebg_foreground_error:
             print(f"[IMAGE QUALITY ERROR] Remove.bg could not identify foreground - NOT rotating API key")
             # Extract the user-friendly message (remove the prefix)
@@ -1026,6 +1374,19 @@ def process_image_job(job):
             print(f"[IMAGE QUALITY ERROR] User message: {user_message}")
             print(f"[IMAGE QUALITY ERROR] Marking job {job_id} as FAILED (not retryable)")
             mark_job_failed(job_id, user_message)
+            return
+        
+        if is_completion_error:
+            print(f"[COMPLETION ERROR] Job completion API call failed - marking as FAILED to prevent reprocessing")
+            print(f"[COMPLETION ERROR] Image was already generated but DB update failed")
+            print(f"[COMPLETION ERROR] Error: {error_message}")
+            mark_job_failed(job_id, f"COMPLETION_FAILED: Image generated but status update failed - {error_message}")
+            return
+        
+        if is_input_image_error:
+            print(f"[INPUT IMAGE ERROR] User input image could not be fetched/uploaded - NOT rotating API key")
+            print(f"[INPUT IMAGE ERROR] Marking job {job_id} as FAILED (not retryable)")
+            mark_job_failed(job_id, "⚠️ Your uploaded image could not be loaded. Please re-upload your image and try again.")
             return
         
         if is_cloudinary_error:
@@ -1159,25 +1520,41 @@ def fetch_all_pending_jobs():
 
 def process_all_pending_jobs():
     print("\n" + "="*60)
-    print("BACKLOG CATCH-UP: Processing pending jobs")
+    print("BACKLOG CATCH-UP: Processing pending image/video jobs")
     print("="*60)
     
     pending_jobs = fetch_all_pending_jobs()
     
     if not pending_jobs:
-        print("No pending jobs in backlog")
+        print("No pending image/video jobs in backlog")
         print("="*60 + "\n")
         return
     
-    print(f"Processing {len(pending_jobs)} pending job(s) with per-provider concurrency...\n")
+    # Filter out workflow jobs (they're handled separately)
+    non_workflow_jobs = [job for job in pending_jobs if job.get("job_type") != "workflow"]
+    workflow_jobs = [job for job in pending_jobs if job.get("job_type") == "workflow"]
     
-    for idx, job in enumerate(pending_jobs, 1):
+    if workflow_jobs:
+        print(f"⚠️  Skipping {len(workflow_jobs)} workflow job(s) - handled by workflow manager")
+    
+    if not non_workflow_jobs:
+        print("No pending image/video jobs in backlog")
+        print("="*60 + "\n")
+        return
+    
+    print(f"Processing {len(non_workflow_jobs)} pending image/video job(s) with per-provider concurrency...\n")
+    
+    for idx, job in enumerate(non_workflow_jobs, 1):
         job_id = job.get("job_id")
         job_type = job.get("job_type", "image")
         prompt = job.get("prompt", "")[:50]
         
-        print(f"[{idx}/{len(pending_jobs)}] Submitting job {job_id} ({job_type})")
+        print(f"[{idx}/{len(non_workflow_jobs)}] Submitting job {job_id} ({job_type})")
         print(f"   Prompt: {prompt}...")
+        
+        if not validate_job_inputs(job):
+            print(f"   Job {job_id} has missing required inputs — marked as failed, skipping\n")
+            continue
         
         try:
             job_thread = threading.Thread(
@@ -1192,8 +1569,39 @@ def process_all_pending_jobs():
             continue
     
     print("="*60)
-    print("Backlog catch-up completed (jobs queued per provider)")
+    print("Image/video backlog catch-up completed (jobs queued per provider)")
     print("="*60 + "\n")
+
+
+def process_all_pending_workflow_jobs():
+    """Process pending and pending_retry workflow jobs on startup"""
+    print("\n" + "="*60)
+    print("BACKLOG CATCH-UP: Processing pending workflow jobs")
+    print("="*60)
+    
+    try:
+        from workflow_retry_manager import get_retry_manager
+        
+        retry_manager = get_retry_manager()
+        
+        # Process both pending and pending_retry workflows
+        pending_count = retry_manager.process_pending_workflows()
+        retry_count = retry_manager.process_retryable_workflows()
+        
+        total_count = pending_count + retry_count
+        
+        if total_count > 0:
+            print(f"✅ Processed {total_count} workflow job(s) ({pending_count} pending, {retry_count} retries)")
+        else:
+            print("No pending workflow jobs in backlog")
+        
+        print("="*60 + "\n")
+        
+    except Exception as e:
+        print(f"❌ Error processing pending workflow jobs: {e}")
+        import traceback
+        traceback.print_exc()
+        print("="*60 + "\n")
 
 
 async def realtime_listener():
@@ -1226,6 +1634,11 @@ async def realtime_listener():
                 job_id = record.get("job_id")
                 job_type = record.get("job_type", "image")
                 
+                if job_type == "workflow":
+                    print(f"[WORKFLOW] Skipping workflow job {job_id} - handled by workflow manager")
+                    sys.stdout.flush()
+                    return
+                
                 print(f"\n{'='*70}")
                 print(f"NEW JOB RECEIVED VIA REALTIME!")
                 print(f"{'='*70}")
@@ -1234,6 +1647,11 @@ async def realtime_listener():
                 print(f"Prompt: {record.get('prompt', '')[:50]}...")
                 print(f"{'='*70}\n")
                 sys.stdout.flush()
+
+                if not validate_job_inputs(record):
+                    print(f"Job {job_id} has missing required inputs — marked as failed immediately")
+                    sys.stdout.flush()
+                    return
                 
                 def process_in_thread():
                     try:
@@ -1280,6 +1698,45 @@ async def realtime_listener():
                 print(f"{'='*70}\n")
                 sys.stdout.flush()
         
+        def handle_flag_change(payload):
+            global _priority_lock_active
+            try:
+                data = payload.get("data", {})
+                record = data.get("record", payload.get("new", payload.get("record", {})))
+
+                if not record or record.get("key") != "priority_lock":
+                    return
+
+                new_value = record.get("value", False)
+                old_value = _priority_lock_active
+                _priority_lock_active = new_value
+
+                if old_value and not new_value:
+                    print("\n" + "=" * 60)
+                    print("[PRIORITY LOCK] Lock DISABLED via remote script")
+                    print("[PRIORITY LOCK] Flushing pending P2/P3 jobs now...")
+                    print("=" * 60 + "\n")
+                    sys.stdout.flush()
+                    threading.Thread(target=process_all_pending_jobs, daemon=True, name="PriorityLockFlush").start()
+                elif not old_value and new_value:
+                    print("\n" + "=" * 60)
+                    print("[PRIORITY LOCK] Lock ENABLED via remote script")
+                    print("[PRIORITY LOCK] Only Priority 1 jobs will be processed")
+                    print("=" * 60 + "\n")
+                    sys.stdout.flush()
+
+            except Exception as e:
+                print(f"[PRIORITY LOCK] Error handling flag change: {e}")
+
+        flags_channel = async_client.channel("system-flags-watcher")
+        await flags_channel.on_postgres_changes(
+            event="UPDATE",
+            schema="public",
+            table="system_flags",
+            callback=handle_flag_change
+        ).subscribe()
+        print("Subscribed to system_flags UPDATE events (priority lock monitoring)")
+
         channel = async_client.channel("job-worker-pending")
 
         subscription_result = await channel.on_postgres_changes(
@@ -1315,44 +1772,126 @@ async def realtime_listener():
         traceback.print_exc()
 
 
-def fetch_pending_jobs_for_provider(provider_key: str):
+def fetch_pending_jobs_for_provider(provider_key: str) -> list:
     """
-    Query pending jobs with 'No API key available' error for a specific provider.
-    
+    Query ALL pending image/video jobs (not workflow) for a specific provider.
+    Matches by explicit provider_key in metadata OR by model-to-provider mapping.
+
     Args:
         provider_key: Provider identifier (e.g., 'vision-nova', 'cinematic-nova')
-        
+
     Returns:
-        List of job records that need to be reprocessed
+        List of non-workflow job records that need to be reprocessed
     """
     try:
         from supabase_client import supabase
-        
-        print(f"[API_KEY_INSERT] Querying pending jobs for provider: {provider_key}")
-        
+
+        print(f"[API_KEY_INSERT] Querying pending image/video jobs for provider: {provider_key}")
+
         response = supabase.table("jobs")\
             .select("*")\
             .eq("status", "pending")\
-            .like("error_message", "%No API key available%")\
+            .neq("job_type", "workflow")\
             .execute()
-        
+
         if not response.data:
-            print(f"[API_KEY_INSERT] No pending jobs found")
+            print(f"[API_KEY_INSERT] No pending image/video jobs found")
             return []
-        
+
         matching_jobs = []
         for job in response.data:
             metadata = job.get("metadata", {}) or {}
             job_provider_key = metadata.get("provider_key") or job.get("provider_key")
-            
+
             if job_provider_key == provider_key:
                 matching_jobs.append(job)
-        
-        print(f"[API_KEY_INSERT] Found {len(matching_jobs)} pending job(s) for provider {provider_key}")
+                continue
+
+            if not job_provider_key:
+                model = job.get("model", "")
+                job_type = job.get("job_type", "image")
+                if map_model_to_provider(model, job_type) == provider_key:
+                    matching_jobs.append(job)
+
+        print(f"[API_KEY_INSERT] Found {len(matching_jobs)} pending image/video job(s) for provider {provider_key}")
         return matching_jobs
-        
+
     except Exception as e:
         print(f"[API_KEY_INSERT] Error querying pending jobs: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
+
+
+def fetch_pending_retry_workflow_jobs_for_provider(provider_key: str) -> list:
+    """
+    Query pending_retry workflow jobs where the CURRENT FAILING STEP uses a model
+    from the given provider.
+
+    Checks execution.error_info.provider first (set when the step failed).
+    Falls back to mapping execution.error_info.model -> provider if provider not recorded.
+
+    Args:
+        provider_key: Provider identifier (e.g., 'vision-nova', 'cinematic-nova')
+
+    Returns:
+        List of workflow job records with their _execution attached
+    """
+    try:
+        from supabase_client import supabase
+
+        print(f"[API_KEY_INSERT] Querying pending_retry workflow jobs for provider: {provider_key}")
+
+        jobs_response = supabase.table("jobs")\
+            .select("*")\
+            .eq("status", "pending_retry")\
+            .eq("job_type", "workflow")\
+            .execute()
+
+        jobs = jobs_response.data if jobs_response.data else []
+
+        if not jobs:
+            print(f"[API_KEY_INSERT] No pending_retry workflow jobs found")
+            return []
+
+        job_ids = [job["job_id"] for job in jobs]
+        executions_response = supabase.table("workflow_executions")\
+            .select("*")\
+            .in_("job_id", job_ids)\
+            .execute()
+
+        executions_map = {ex["job_id"]: ex for ex in (executions_response.data or [])}
+
+        matching_jobs = []
+        for job in jobs:
+            job_id = job["job_id"]
+            execution = executions_map.get(job_id)
+
+            if not execution:
+                print(f"[API_KEY_INSERT] Workflow job {job_id} has no execution record, skipping")
+                continue
+
+            error_info = execution.get("error_info", {}) or {}
+
+            failing_provider = error_info.get("provider")
+            if failing_provider:
+                if failing_provider == provider_key:
+                    job["_execution"] = execution
+                    matching_jobs.append(job)
+                continue
+
+            failing_model = error_info.get("model")
+            if failing_model:
+                if (map_model_to_provider(failing_model, "image") == provider_key or
+                        map_model_to_provider(failing_model, "video") == provider_key):
+                    job["_execution"] = execution
+                    matching_jobs.append(job)
+
+        print(f"[API_KEY_INSERT] Found {len(matching_jobs)} pending_retry workflow job(s) for provider {provider_key}")
+        return matching_jobs
+
+    except Exception as e:
+        print(f"[API_KEY_INSERT] Error querying pending_retry workflow jobs: {e}")
         import traceback
         traceback.print_exc()
         return []
@@ -1423,48 +1962,105 @@ def handle_api_key_insertion(payload):
         provider_key = provider_result.data[0]["provider_name"]
         print(f"Provider Name: {provider_key}")
         print("="*70 + "\n")
-        
+
         pending_jobs = fetch_pending_jobs_for_provider(provider_key)
-        
-        if not pending_jobs:
-            print(f"[API_KEY_INSERT] No pending jobs to reprocess for {provider_key}")
+        workflow_jobs = fetch_pending_retry_workflow_jobs_for_provider(provider_key)
+
+        total = len(pending_jobs) + len(workflow_jobs)
+
+        if total == 0:
+            print(f"[API_KEY_INSERT] No jobs to reprocess for {provider_key}")
             return
-        
-        print(f"\n{'='*70}")
-        print(f"REPROCESSING {len(pending_jobs)} PENDING JOB(S) FOR {provider_key}")
-        print(f"{'='*70}\n")
-        
-        for idx, job in enumerate(pending_jobs, 1):
-            job_id = job.get("job_id") or job.get("id")
-            job_type = job.get("job_type", "image")
-            prompt = job.get("prompt", "")[:50]
-            
-            print(f"[{idx}/{len(pending_jobs)}] Reprocessing job {job_id} ({job_type})")
-            print(f"   Prompt: {prompt}...")
-            
-            try:
-                requests.post(
-                    f"{BACKEND_URL}/worker/job/{job_id}/progress",
-                    json={"progress": 5, "message": f"API key now available, starting generation..."},
-                    timeout=10,
-                    verify=VERIFY_SSL
-                )
-                
-                job_thread = threading.Thread(
-                    target=process_job_with_concurrency_control,
-                    args=(job,),
-                    daemon=True
-                )
-                job_thread.start()
-                
-                print(f"   ✅ Job {job_id} submitted for reprocessing\n")
-            except Exception as e:
-                print(f"   ❌ Job {job_id} reprocessing failed: {e}\n")
-                reset_job_to_pending(job_id, provider_key, f"Reprocessing failed: {str(e)}")
-                continue
-        
+
+        # --- Image / Video jobs (status=pending) ---
+        if pending_jobs:
+            print(f"\n{'='*70}")
+            print(f"REPROCESSING {len(pending_jobs)} PENDING IMAGE/VIDEO JOB(S) FOR {provider_key}")
+            print(f"{'='*70}\n")
+
+            for idx, job in enumerate(pending_jobs, 1):
+                job_id = job.get("job_id") or job.get("id")
+                job_type = job.get("job_type", "image")
+                prompt = job.get("prompt", "")[:50]
+
+                print(f"[{idx}/{len(pending_jobs)}] Reprocessing {job_type} job {job_id}")
+                print(f"   Prompt: {prompt}...")
+
+                if not validate_job_inputs(job):
+                    print(f"   ❌ Job {job_id} missing required inputs — marked as failed, skipping\n")
+                    continue
+
+                try:
+                    requests.post(
+                        f"{BACKEND_URL}/worker/job/{job_id}/progress",
+                        json={"progress": 5, "message": "API key now available, starting generation..."},
+                        timeout=10,
+                        verify=VERIFY_SSL
+                    )
+
+                    job_thread = threading.Thread(
+                        target=process_job_with_concurrency_control,
+                        args=(job,),
+                        daemon=True
+                    )
+                    job_thread.start()
+
+                    print(f"   ✅ Job {job_id} submitted for reprocessing\n")
+                except Exception as e:
+                    print(f"   ❌ Job {job_id} reprocessing failed: {e}\n")
+                    reset_job_to_pending(job_id, provider_key, f"Reprocessing failed: {str(e)}")
+                    continue
+
+        # --- Workflow jobs (status=pending_retry) ---
+        if workflow_jobs:
+            print(f"\n{'='*70}")
+            print(f"REPROCESSING {len(workflow_jobs)} PENDING_RETRY WORKFLOW JOB(S) FOR {provider_key}")
+            print(f"{'='*70}\n")
+
+            from workflow_retry_manager import get_retry_manager
+            retry_manager = get_retry_manager()
+
+            for idx, job in enumerate(workflow_jobs, 1):
+                job_id = job.get("job_id") or job.get("id")
+                execution = job.get("_execution", {})
+                execution_id = execution.get("id")
+                error_info = execution.get("error_info", {}) or {}
+                failing_step = error_info.get("step_index", "?")
+
+                print(f"[{idx}/{len(workflow_jobs)}] Resuming workflow job {job_id} "
+                      f"(failing step: {failing_step}, provider: {provider_key})")
+
+                if not execution_id:
+                    print(f"   ❌ No execution_id for workflow job {job_id}, skipping\n")
+                    continue
+
+                if not validate_job_inputs(job):
+                    print(f"   ❌ Workflow job {job_id} missing required inputs — marked as failed, skipping\n")
+                    continue
+
+                try:
+                    def resume_workflow(exec_id=execution_id, jid=job_id):
+                        import asyncio as _asyncio
+                        loop = _asyncio.new_event_loop()
+                        _asyncio.set_event_loop(loop)
+                        try:
+                            loop.run_until_complete(
+                                retry_manager._resume_workflow(exec_id, jid)
+                            )
+                        finally:
+                            loop.close()
+
+                    wf_thread = threading.Thread(target=resume_workflow, daemon=True)
+                    wf_thread.start()
+
+                    print(f"   ✅ Workflow job {job_id} submitted for resume\n")
+                except Exception as e:
+                    print(f"   ❌ Workflow job {job_id} resume failed: {e}\n")
+                    continue
+
         print(f"{'='*70}")
-        print(f"REPROCESSING COMPLETED FOR {provider_key}")
+        print(f"REPROCESSING COMPLETED FOR {provider_key} "
+              f"({len(pending_jobs)} image/video, {len(workflow_jobs)} workflow)")
         print(f"{'='*70}\n")
         
     except Exception as e:
@@ -1552,6 +2148,9 @@ def worker_startup_tasks():
         print("[STARTUP] Running background initialization...")
         print("="*60)
         
+        # Load priority lock state from Supabase
+        _load_priority_lock_from_db()
+
         # Reset stale running jobs
         reset_running_jobs_to_pending()
         
@@ -1560,6 +2159,7 @@ def worker_startup_tasks():
         print("WORKER STARTUP: Initial backlog catch-up")
         print("="*60)
         process_all_pending_jobs()
+        process_all_pending_workflow_jobs()
         print("Initial backlog processed!\n")
         
         worker_status["backlog_processed"] = True
@@ -1612,7 +2212,7 @@ def start_realtime():
     try:
         last_heartbeat = time.time()
         last_retry_check = time.time()
-        RETRY_INTERVAL = 300  # 5 minutes - retry pending jobs with transient errors
+        RETRY_INTERVAL = 600  # 10 minutes - retry pending jobs with transient errors
         
         while True:
             time.sleep(5)

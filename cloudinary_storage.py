@@ -207,28 +207,28 @@ class CloudinaryStorage:
         Returns:
             dict: Same as upload_image()
         """
+        tmp_path = None
         try:
-            # Create temporary file
-            with tempfile.NamedTemporaryFile(delete=False, suffix=Path(file_name).suffix) as tmp_file:
-                tmp_file.write(image_bytes)
-                tmp_path = tmp_file.name
-            
-            # Upload the temporary file with metadata
-            result = self.upload_image(tmp_path, folder_name, metadata=metadata)
-            
-            # Clean up temporary file
             try:
-                os.unlink(tmp_path)
-            except:
-                pass
-            
+                with tempfile.NamedTemporaryFile(delete=False, suffix=Path(file_name).suffix) as tmp_file:
+                    tmp_file.write(image_bytes)
+                    tmp_path = tmp_file.name
+            except OSError as e:
+                print(f"[CLOUDINARY ERROR] Failed to write temp file for {file_name}: {e}")
+                return {
+                    "success": False,
+                    "error": f"Failed to write temporary file: {str(e)}"
+                }
+
+            result = self.upload_image(tmp_path, folder_name, metadata=metadata)
             return result
-            
-        except Exception as e:
-            return {
-                "success": False,
-                "error": str(e)
-            }
+
+        finally:
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
     
     def upload_video(self, video_path, job_id=None, folder_name="ai-generated-videos", metadata=None):
         """

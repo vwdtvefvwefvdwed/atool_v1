@@ -1,5 +1,20 @@
 {
   "vision-removebg": {
     "current_row": 1
+  },
+  "vision-infip": {
+    "current_row": 1
+  },
+  "vision-leonardo": {
+    "current_row": 1
+  },
+  "cinematic-leonardo": {
+    "current_row": 1
+  },
+  "vision-ultrafast": {
+    "current_row": 1
+  },
+  "vision-stabilityai": {
+    "current_row": 1
   }
 }

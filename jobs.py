@@ -23,7 +23,7 @@ USE_EDGE_FUNCTION = os.getenv("USE_EDGE_FUNCTION", "false").lower() == "true"
 
 def create_job(user_id: str, prompt: str, model: str = "flux-dev", 
                aspect_ratio: str = "1:1", negative_prompt: str = "",
-               job_type: str = "image", duration: int = 5, image_url: str = None, mask_url: str = None) -> dict:
+               job_type: str = "image", duration: int = 5, image_url = None, mask_url: str = None) -> dict:
     """
     Create a new image/video generation job
     ✅ OPTIMIZED: Can use batch RPC (6 operations → 1 call)
@@ -37,15 +37,16 @@ def create_job(user_id: str, prompt: str, model: str = "flux-dev",
         negative_prompt: Things to avoid in generation
         job_type: Type of job - 'image' or 'video'
         duration: Duration in seconds for video generation (default: 5)
-        image_url: Optional uploaded image URL for image-to-video
+        image_url: Optional uploaded image URL(s) for image-to-image/video. Can be a single URL (string) or multiple URLs (list)
+        mask_url: Optional mask URL for mask-based editing models
         
     Returns:
         dict with job data
     """
     try:
         # ✅ OPTIMIZED: Use batch RPC if enabled (reduces 6 calls to 1)
-        # NOTE: Batch RPC doesn't support duration/image_url, so skip for video jobs OR when image_url provided
-        if USE_BATCH_JOB_CREATION and job_type != "video" and not image_url:
+        # NOTE: Batch RPC doesn't support duration/image_url/workflow, so skip for video/workflow jobs OR when image_url provided
+        if USE_BATCH_JOB_CREATION and job_type == "image" and not image_url:
             try:
                 print(f"🚀 Using BATCH RPC for job creation")
                 batch_response = execute_with_failover(
@@ -142,10 +143,14 @@ def create_job(user_id: str, prompt: str, model: str = "flux-dev",
         else:
             print(f"⚠️  job_type is '{job_type}', NOT 'video' - duration NOT added to metadata")
         
-        # Add image_url to metadata for image-to-video
+        # Add image_url(s) to metadata for image-to-image/video
+        # Supports both single URL (string) and multiple URLs (list)
         if image_url:
             metadata["input_image_url"] = image_url
-            print(f"🖼️  Added input image URL to job metadata: {image_url}")
+            if isinstance(image_url, list):
+                print(f"🖼️  Added {len(image_url)} input image URLs to job metadata")
+            else:
+                print(f"🖼️  Added input image URL to job metadata: {image_url}")
         else:
             print(f"⚠️  No image_url provided - creating text-only job")
         
@@ -159,18 +164,24 @@ def create_job(user_id: str, prompt: str, model: str = "flux-dev",
             "prompt": prompt,
             "model": model,
             "aspect_ratio": aspect_ratio,
-            "job_type": job_type,  # ✅ Store job_type in database (image or video)
+            "job_type": job_type,  # ✅ Store job_type in database (image, video, or workflow)
             "status": "pending",
             "progress": 0,
             "metadata": metadata
         }
         
+        print(f"📦 Creating job with job_type: {job_type}")
+        
         # Add image_url to job table if provided (for Qwen Image Edit and other image-based models)
+        # Note: If image_url is a list, store it as JSON in the database
         if image_url:
             job_data["image_url"] = image_url
-            print(f"✅ Added image_url to job_data: {image_url}")
+            if isinstance(image_url, list):
+                print(f"✅ Added {len(image_url)} image_urls to job_data")
+            else:
+                print(f"✅ Added image_url to job_data: {image_url}")
         
-        # ✅ job_type is now stored in the database for proper backend routing
+        # ✅ job_type is stored in the database for proper backend routing (image, video, workflow)
         
         # Add negative_prompt only if database supports it (optional field)
         # Currently omitted as the jobs table doesn't have this column
@@ -187,6 +198,7 @@ def create_job(user_id: str, prompt: str, model: str = "flux-dev",
         
         # Debug: Print what we got back
         print(f"📊 Job created response: {job}")
+        print(f"✅ Job type saved to database: {job.get('job_type')}")
         
         # Use job_id field (database uses job_id, not id)
         job_id = job.get("job_id") or job.get("id")
@@ -251,6 +263,7 @@ def create_job(user_id: str, prompt: str, model: str = "flux-dev",
                 "prompt": job["prompt"],
                 "model": job["model"],
                 "aspect_ratio": job["aspect_ratio"],
+                "job_type": job["job_type"],  # Include job_type in response
                 "created_at": job["created_at"],
                 "priority": priority_level,
                 "generation_number": new_generation_count
@@ -309,7 +322,7 @@ def get_job(job_id: str) -> dict:
         }
 
 
-def get_user_jobs(user_id: str, status: Optional[str] = None, limit: int = 50) -> dict:
+def get_user_jobs(user_id: str, status: Optional[str] = None, limit: int = 50, job_type: Optional[str] = None) -> dict:
     """
     Get all jobs for a user
     
@@ -317,6 +330,7 @@ def get_user_jobs(user_id: str, status: Optional[str] = None, limit: int = 50) -
         user_id: UUID of the user
         status: Filter by status (pending/running/completed/failed)
         limit: Maximum number of jobs to return
+        job_type: Filter by job type (image/video/workflow)
         
     Returns:
         dict with list of jobs
@@ -326,6 +340,9 @@ def get_user_jobs(user_id: str, status: Optional[str] = None, limit: int = 50) -
         
         if status:
             query = query.eq("status", status)
+        
+        if job_type:
+            query = query.eq("job_type", job_type)
         
         response = query.order("created_at", desc=True).limit(limit).execute()
         

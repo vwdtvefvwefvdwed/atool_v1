@@ -1,0 +1,51 @@
+{
+  "id": "knight-style-img-to-img",
+  "name": "Knight Style (4x Upscale)",
+  "description": "Transform your image into a cinematic medieval knight portrait + fast 4x upscale (2 credits)",
+  "icon": "⚔️",
+  "category": "transform",
+  "preview_video": null,
+  "preview_thumbnail": null,
+  "enabled": true,
+  "default_prompts": {
+    "image_edit": "Use Image A as a high-fidelity facial reference for likeness and fine features (not strict identity lock) and generate a true photorealistic cinematic tight chest-up close-up of a Knight of the Seven Kingdoms on a powerful medieval warhorse, wearing only full polished silver articulated steel plate armor (no cloth) with enclosed chest plate, engraved pauldrons, vambraces, gauntlets, and gorget, showing authentic articulation, micro-scratches, edge wear, subtle dents, correct weight distribution, and real metal reflectivity; he holds a heavy battle-worn silver great helm/sallet hybrid helmet in one hand with engraved details, rivets, and visible leather padding and strap, clearly functional. The knight looks directly at the camera with calm authority from a slight low angle, horse head slightly foreground and out of focus with wind only in the mane; preserve accurate facial proportions and realism with detailed eyes, natural skin texture, subtle asymmetry, and correct head-to-shoulder scale, ensuring seamless face-body blending, consistent skin tone, correct lighting and contact shadows, and no seams or AI artifacts. Set in a windswept medieval battlefield with cinematic daylight or overcast mood and dust atmosphere, rendered in absolute photographic realism with an 85–100mm portrait lens, shallow depth of field, film-grade color, global illumination, HDR, ultra-detailed 8K, razor-sharp focus, no cartoon or plastic look.",
+    "upscale": "Ultra high-resolution photorealistic medieval knight portrait, polished silver armor, sharp focus, intricate details, cinematic quality, 8K, HDR"
+  },
+  "supported_models": {
+    "image_edit": [
+      "nano-banana-pro-leonardo"
+    ],
+    "upscale": [
+      "stability-upscale-fast"
+    ]
+  },
+  "steps": [
+    {
+      "id": 0,
+      "name": "upload",
+      "type": "input",
+      "description": "Upload your input image",
+      "required_input": "image"
+    },
+    {
+      "id": 1,
+      "name": "image_edit",
+      "type": "generation",
+      "description": "AI-powered Knight style transformation",
+      "model_type": "image",
+      "default_model": "nano-banana-pro-leonardo",
+      "provider": "vision-leonardo"
+    },
+    {
+      "id": 2,
+      "name": "upscale",
+      "type": "generation",
+      "description": "Fast 4x upscale with Stability AI (2 credits)",
+      "model_type": "image",
+      "default_model": "stability-upscale-fast",
+      "provider": "vision-stabilityai"
+    }
+  ],
+  "estimated_duration_seconds": 60,
+  "credits_cost": 27
+}

@@ -1,0 +1,51 @@
+{
+  "id": "pencil-physique-portrait",
+  "name": "Pencil Physique Portrait (4x Upscale)",
+  "description": "Transform your photo into a detailed black-and-white graphite pencil sketch with realistic anatomy + fast 4x upscale (2 credits)",
+  "icon": "✏️",
+  "category": "transform",
+  "preview_video": null,
+  "preview_thumbnail": null,
+  "enabled": true,
+  "default_prompts": {
+    "image_edit": "Use Image A as a high-fidelity facial reference for likeness and fine features (not strict identity lock). Generate a highly detailed black-and-white pencil sketch illustration of a skinny athletic Black male subject — upper body from waist-up, shirtless, clearly defined six-pack abs and natural lean muscular anatomy. The subject stands in a 3/4 angled pose with his head slightly tilted downward, gaze directed slightly below the camera (no eye contact), calm and introspective expression. Enforce realistic anatomical proportions with accurate ribcage, shoulders, collarbone, and abdominal structure. The style must look like traditional graphite pencil drawing with visible sketch strokes, layered shading, cross-hatching, tonal gradients built from pencil pressure variation, and subtle paper grain texture. Do NOT use smooth digital airbrush shading, vector lines, or flat clip-art style; enforce raw hand-drawn realism with organic line variation and natural imperfections. Background should be clean white or light studio tone with soft graphite falloff. Preserve facial structure, jawline, cheekbones, and head-to-body scale from Image A while adapting into a realistic pencil sketch form. High contrast lighting expressed through shading density, ultra-detailed, sharp anatomy rendering, no color, no stylization, no cartoon look, no plastic skin effect, no AI artifacts.",
+    "upscale": "Ultra high-resolution black-and-white pencil sketch portrait, sharp detailed graphite strokes, fine anatomy rendering, paper grain texture, 8K, HDR"
+  },
+  "supported_models": {
+    "image_edit": [
+      "nano-banana-pro-leonardo"
+    ],
+    "upscale": [
+      "stability-upscale-fast"
+    ]
+  },
+  "steps": [
+    {
+      "id": 0,
+      "name": "upload",
+      "type": "input",
+      "description": "Upload your input image",
+      "required_input": "image"
+    },
+    {
+      "id": 1,
+      "name": "image_edit",
+      "type": "generation",
+      "description": "AI-powered pencil physique portrait transformation",
+      "model_type": "image",
+      "default_model": "nano-banana-pro-leonardo",
+      "provider": "vision-leonardo"
+    },
+    {
+      "id": 2,
+      "name": "upscale",
+      "type": "generation",
+      "description": "Fast 4x upscale with Stability AI (2 credits)",
+      "model_type": "image",
+      "default_model": "stability-upscale-fast",
+      "provider": "vision-stabilityai"
+    }
+  ],
+  "estimated_duration_seconds": 60,
+  "credits_cost": 27
+}

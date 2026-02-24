@@ -177,6 +177,7 @@ def map_model_to_provider(model_name: str, job_type: str = "image") -> Optional[
     - vision-flux -> KIE AI API
     - vision-removebg -> Remove.bg API
     - vision-bria, cinematic-bria -> Bria AI API
+    - vision-leonardo, cinematic-leonardo -> Leonardo AI API
     
     Args:
         model_name: Name of the AI model
@@ -253,6 +254,10 @@ def map_model_to_provider(model_name: str, job_type: str = "image") -> Optional[
         "vision-deapi": [
             "z-image-turbo-deapi",
             "flux-schnell-deapi",
+        ],
+        "vision-leonardo": [
+            "ideogram-3.0",
+            "nano-banana-pro-leonardo",
         ]
     }
     
@@ -273,6 +278,9 @@ def map_model_to_provider(model_name: str, job_type: str = "image") -> Optional[
             "bria_video_mask_prompt",
             "bria_video_mask_keypoints",
             "bria_video_foreground_mask",
+        ],
+        "cinematic-leonardo": [
+            "seedance-1.0-pro-fast",
         ],
     }
     

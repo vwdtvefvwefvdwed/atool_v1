@@ -25,7 +25,7 @@ NEW_SUPABASE_KEY = os.getenv('NEW_SUPABASE_SERVICE_ROLE_KEY') or os.getenv('NEW_
 ENABLE_STARTUP_SYNC = os.getenv('ENABLE_STARTUP_SYNC', 'true').lower() == 'true'
 
 # Tables to sync (in dependency order)
-SYNC_TABLES = ['users', 'jobs', 'sessions', 'usage_logs', 'ad_sessions', 'shared_results']
+SYNC_TABLES = ['users', 'jobs', 'workflow_executions', 'sessions', 'usage_logs', 'ad_sessions', 'shared_results']
 BATCH_SIZE = 100
 
 
@@ -128,8 +128,8 @@ def sync_table(old_client: Client, new_client: Client, table_name: str,
     try:
         print_info(f"Syncing {table_name}...")
         
-        # Fetch all records created/updated after last sync
-        timestamp_field = 'created_at'
+        # jobs and workflow_executions use updated_at to catch status/step changes on existing rows
+        timestamp_field = 'updated_at' if table_name in ('jobs', 'workflow_executions') else 'created_at'
         
         data = old_client.table(table_name)\
             .select('*')\
@@ -144,7 +144,7 @@ def sync_table(old_client: Client, new_client: Client, table_name: str,
         print_info(f"{table_name}: Found {total_records} records to sync")
         
         # Check for missing parent users
-        if table_name in ['jobs', 'sessions', 'ad_sessions', 'shared_results'] and total_records > 0:
+        if table_name in ['jobs', 'sessions', 'ad_sessions', 'shared_results', 'workflow_executions'] and total_records > 0:
             user_ids = set(record.get('user_id') for record in data.data if record.get('user_id'))
             
             if user_ids:
@@ -158,6 +158,29 @@ def sync_table(old_client: Client, new_client: Client, table_name: str,
                 
                 if missing_user_ids:
                     sync_user_dependencies(old_client, new_client, missing_user_ids)
+        
+        # Check for missing parent jobs for workflow_executions (FK: job_id -> jobs.job_id)
+        if table_name == 'workflow_executions' and total_records > 0:
+            job_ids = set(record.get('job_id') for record in data.data if record.get('job_id'))
+            if job_ids:
+                existing_jobs = new_client.table('jobs')\
+                    .select('job_id')\
+                    .in_('job_id', list(job_ids))\
+                    .execute()
+                existing_job_ids = set(j['job_id'] for j in existing_jobs.data) if existing_jobs.data else set()
+                missing_job_ids = job_ids - existing_job_ids
+                if missing_job_ids:
+                    print_warning(f"   Found {len(missing_job_ids)} parent jobs not in NEW account, syncing...")
+                    try:
+                        missing_jobs_data = old_client.table('jobs')\
+                            .select('*')\
+                            .in_('job_id', list(missing_job_ids))\
+                            .execute()
+                        if missing_jobs_data.data:
+                            new_client.table('jobs').upsert(missing_jobs_data.data).execute()
+                            print_info(f"   Synced {len(missing_jobs_data.data)} missing parent jobs")
+                    except Exception as job_sync_err:
+                        print_error(f"   Failed to sync missing parent jobs: {job_sync_err}")
         
         # Sync in batches
         synced_count = 0

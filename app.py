@@ -82,6 +82,10 @@ ensure_quota_manager_started()
 from worker_health import ping_all_workers_async
 ping_all_workers_async()
 
+# Start workflow retry manager for auto-retry of failed workflows
+from workflow_retry_manager import start_retry_manager
+start_retry_manager()
+
 # Configure CORS to allow requests from frontend
 # This fixes the "No 'Access-Control-Allow-Origin' header" error
 load_dotenv()
@@ -865,16 +869,17 @@ def jobs_create():
         }), 400
     print(f"✅ CAPTCHA verified successfully")
 
-    # Check for active jobs (pending or processing)
+    # Check for active jobs (pending, running, or pending_retry for workflows)
     try:
-        active_jobs_response = supabase.table("jobs").select("id, status").eq(
+        active_jobs_response = supabase.table("jobs").select("job_id, status, job_type").eq(
             "user_id", user["user_id"]
         ).in_(
-            "status", ["pending", "processing"]
+            "status", ["pending", "running", "pending_retry"]
         ).limit(1).execute()
         
         if active_jobs_response.data and len(active_jobs_response.data) > 0:
-            print(f"⚠️ User {user['user_id']} has active job: {active_jobs_response.data[0]['id']} ({active_jobs_response.data[0]['status']})")
+            active_job = active_jobs_response.data[0]
+            print(f"⚠️ User {user['user_id']} has active job: {active_job['job_id']} (status={active_job['status']}, type={active_job.get('job_type')})")
             return jsonify({
                 "success": False,
                 "error": "Run one job at a time"
@@ -896,65 +901,78 @@ def jobs_create():
         job_type = request.form.get("job_type", "image")
         duration = int(request.form.get("duration", 5))  # Duration in seconds for videos
 
-        # Handle uploaded image
-        uploaded_image = request.files.get("image")
+        # Handle uploaded image(s) - supports single or multiple images
+        uploaded_images = request.files.getlist("images") or ([request.files.get("image")] if request.files.get("image") else [])
         image_url = None
+        image_urls = []
 
-        if uploaded_image:
-            # Detect if this is a video or image file
-            filename = uploaded_image.filename.lower()
-            is_video = filename.endswith(('.mp4', '.mov', '.avi', '.webm', '.mkv', '.flv', '.wmv'))
+        if uploaded_images and uploaded_images[0]:
+            print(f"\n📸 Processing {len(uploaded_images)} uploaded file(s)")
             
-            file_type = "video" if is_video else "image"
-            print(f"\n📸 {file_type.title()} file received:")
-            print(f"   Filename: {uploaded_image.filename}")
-            print(f"   Size: {len(uploaded_image.read())} bytes")
-            uploaded_image.seek(0)  # Reset file pointer after reading size
-
-            try:
-                # Save temporarily and upload to Cloudinary
-                import tempfile
-                import uuid
-                temp_dir = tempfile.gettempdir()
-                temp_filename = f"{uuid.uuid4()}_{uploaded_image.filename}"
-                temp_path = os.path.join(temp_dir, temp_filename)
-
-                uploaded_image.save(temp_path)
-                print(f"✅ Saved uploaded {file_type} to: {temp_path}")
-
-                # Upload to Cloudinary using appropriate method
-                storage = get_cloudinary_manager()
-                print(f"☁️  Uploading {file_type} to Cloudinary...")
+            for idx, uploaded_image in enumerate(uploaded_images, 1):
+                # Detect if this is a video or image file
+                filename = uploaded_image.filename.lower()
+                is_video = filename.endswith(('.mp4', '.mov', '.avi', '.webm', '.mkv', '.flv', '.wmv'))
                 
-                if is_video:
-                    cloudinary_result = storage.upload_video(temp_path, folder_name="user_uploads")
-                else:
-                    cloudinary_result = storage.upload_image(temp_path, folder_name="user_uploads")
-                
-                print(f"   Result: {cloudinary_result}")
+                file_type = "video" if is_video else "image"
+                print(f"\n📸 {file_type.title()} file {idx}/{len(uploaded_images)} received:")
+                print(f"   Filename: {uploaded_image.filename}")
+                print(f"   Size: {len(uploaded_image.read())} bytes")
+                uploaded_image.seek(0)  # Reset file pointer after reading size
 
-                # Handle both string URLs and dict responses from Cloudinary
-                if isinstance(cloudinary_result, str):
-                    image_url = cloudinary_result
-                else:
-                    image_url = cloudinary_result.get('secure_url') or cloudinary_result.get('url')
-                
-                if image_url:
-                    print(f"✅ Uploaded {file_type} to Cloudinary: {image_url}")
-                else:
-                    print(f"❌ No URL in Cloudinary result: {cloudinary_result}")
+                try:
+                    # Save temporarily and upload to Cloudinary
+                    import tempfile
+                    import uuid
+                    temp_dir = tempfile.gettempdir()
+                    temp_filename = f"{uuid.uuid4()}_{uploaded_image.filename}"
+                    temp_path = os.path.join(temp_dir, temp_filename)
 
-                # Clean up temp file
-                os.remove(temp_path)
+                    uploaded_image.save(temp_path)
+                    print(f"✅ Saved uploaded {file_type} to: {temp_path}")
 
-            except Exception as e:
-                import traceback
-                print(f"❌ Error handling uploaded {file_type}: {e}")
-                print(f"   Traceback: {traceback.format_exc()}")
-                return jsonify({
-                    "success": False,
-                    "error": f"Failed to process uploaded {file_type}: {str(e)}"
-                }), 400
+                    # Upload to Cloudinary using appropriate method
+                    storage = get_cloudinary_manager()
+                    print(f"☁️  Uploading {file_type} to Cloudinary...")
+                    
+                    if is_video:
+                        cloudinary_result = storage.upload_video(temp_path, folder_name="user_uploads")
+                    else:
+                        cloudinary_result = storage.upload_image(temp_path, folder_name="user_uploads")
+                    
+                    print(f"   Result: {cloudinary_result}")
+
+                    # Handle both string URLs and dict responses from Cloudinary
+                    if isinstance(cloudinary_result, str):
+                        uploaded_url = cloudinary_result
+                    else:
+                        uploaded_url = cloudinary_result.get('secure_url') or cloudinary_result.get('url')
+                    
+                    if uploaded_url:
+                        print(f"✅ Uploaded {file_type} to Cloudinary: {uploaded_url}")
+                        image_urls.append(uploaded_url)
+                    else:
+                        print(f"❌ No URL in Cloudinary result: {cloudinary_result}")
+
+                    # Clean up temp file
+                    os.remove(temp_path)
+
+                except Exception as e:
+                    import traceback
+                    print(f"❌ Error handling uploaded {file_type}: {e}")
+                    print(f"   Traceback: {traceback.format_exc()}")
+                    return jsonify({
+                        "success": False,
+                        "error": f"Failed to process uploaded {file_type}: {str(e)}"
+                    }), 400
+            
+            # Set image_url to single URL or array based on count
+            if len(image_urls) == 1:
+                image_url = image_urls[0]
+            elif len(image_urls) > 1:
+                image_url = image_urls
+            
+            print(f"✅ Total uploaded: {len(image_urls)} file(s)")
         else:
             print(f"⚠️  No image file in request.files")
 
@@ -1013,7 +1031,8 @@ def jobs_create():
         negative_prompt = data.get("negative_prompt", "")
         job_type = data.get("job_type", "image")
         duration = int(data.get("duration", 5))  # Duration in seconds for videos
-        image_url = data.get("image_url", None)  # For passing existing URLs
+        # Support both single URL (string) and multiple URLs (array) via image_url or image_urls
+        image_url = data.get("image_urls") or data.get("image_url", None)
         mask_url = data.get("mask_url", None)  # For passing existing mask URLs
 
     if not prompt:
@@ -1052,7 +1071,12 @@ def jobs_create():
     print(f"   Job Type: {job_type}")
     print(f"   Model: {model}")
     print(f"   Duration: {duration}s")
-    print(f"   Image URL: {image_url}")
+    if isinstance(image_url, list):
+        print(f"   Image URLs: {len(image_url)} images")
+        for idx, url in enumerate(image_url, 1):
+            print(f"     {idx}. {url[:80]}...")
+    else:
+        print(f"   Image URL: {image_url}")
     print(f"   Mask URL: {mask_url}")
 
     result = create_job(
@@ -1082,8 +1106,9 @@ def jobs_get_all():
     user = get_current_user()
     status = request.args.get("status")
     limit = int(request.args.get("limit", 50))
+    job_type = request.args.get("job_type")
 
-    result = get_user_jobs(user["user_id"], status, limit)
+    result = get_user_jobs(user["user_id"], status, limit, job_type)
 
     if result["success"]:
         return jsonify(result), 200
@@ -1200,11 +1225,14 @@ def jobs_stream_status(job_id):
     import json
     import queue
 
-    # Log immediately with all headers
+    # Guard against frontend sending undefined/null before job_id is known
+    if not job_id or job_id in ("undefined", "null", ""):
+        print(f"❌ SSE rejected: invalid job_id='{job_id}'")
+        return jsonify({"success": False, "error": "Invalid job ID"}), 400
+
     print(f"\n{'='*80}")
     print(f"🚀🚀🚀 SSE ENDPOINT REACHED 🚀🚀🚀")
     print(f"Job ID: {job_id}")
-    print(f"Request Headers: {dict(request.headers)}")
     print(f"{'='*80}\n")
 
     user = get_current_user()
@@ -1221,12 +1249,13 @@ def jobs_stream_status(job_id):
         print(f"❌ Error fetching job: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
-    print(f"✅ SSE stream authorized for job {job_id}")
+    current_job = job_response.data
+    print(f"✅ SSE stream authorized for job {job_id} (current status: {current_job.get('status')})")
 
     # Create queue for this client
     client_queue = queue.Queue(maxsize=100)
 
-    # Subscribe to job updates via shared manager
+    # Subscribe BEFORE checking current state to avoid missing events between the two
     realtime_manager = get_realtime_manager()
     print(f"   Realtime manager running: {realtime_manager.running}")
     realtime_manager.subscribe_to_job(job_id, client_queue)
@@ -1235,9 +1264,17 @@ def jobs_stream_status(job_id):
     def generate():
         """Generate SSE events from shared realtime connection"""
         try:
-            # Send initial connection event with explicit event name
+            # Send initial connection event
             yield f"event: connected\ndata: {json.dumps({'type': 'connected', 'job_id': job_id})}\n\n"
             print(f"📡 SSE connection event sent for job {job_id}")
+
+            # Immediately send current job state (catch-up: handles already-completed jobs)
+            yield f"event: update\ndata: {json.dumps({'type': 'update', 'event': 'UPDATE', 'job': current_job})}\n\n"
+            print(f"📤 SSE catch-up state sent: {job_id} status={current_job.get('status')}")
+            if current_job.get("status") in ("completed", "failed", "cancelled"):
+                print(f"✅ Job {job_id} already finished ({current_job.get('status')}), sending complete and closing")
+                yield f"event: complete\ndata: {json.dumps({'type': 'complete', 'job': current_job})}\n\n"
+                return
 
             # Stream updates from queue
             while True:
@@ -1388,6 +1425,31 @@ def worker_update_progress(job_id):
     )
 
     if result.get("success"):
+        # Manually dispatch SSE event to connected clients
+        try:
+            realtime_manager = get_realtime_manager()
+            
+            # Get updated job data for SSE dispatch
+            updated_job_response = supabase.table("jobs").select("*").eq("job_id", job_id).execute()
+            if updated_job_response.data:
+                updated_job = updated_job_response.data[0]
+                
+                # Dispatch to SSE clients
+                sse_payload = {
+                    "eventType": "UPDATE",
+                    "new": updated_job,
+                    "old": {},
+                    "data": {
+                        "record": updated_job,
+                        "type": "UPDATE"
+                    }
+                }
+                
+                realtime_manager._dispatch_event(job_id, sse_payload)
+                print(f"📡 Manually dispatched progress event to SSE clients for job {job_id}")
+        except Exception as sse_error:
+            print(f"⚠️ Error dispatching SSE event: {sse_error}")
+        
         return jsonify({"success": True}), 200
     else:
         return jsonify({"success": False, "error": "Failed to update progress"}), 500
@@ -1436,6 +1498,42 @@ def worker_complete_job(job_id):
                         print(f"✅ Marked provider trial used: {provider_key} for user {user_id}")
         except Exception as e:
             print(f"⚠️ Error updating provider trial: {e}")
+        
+        try:
+            meta_resp = supabase.table("jobs").select("metadata").eq("job_id", job_id).execute()
+            if meta_resp.data:
+                meta = meta_resp.data[0].get("metadata") or {}
+                if "pending_retry_count" in meta:
+                    meta.pop("pending_retry_count")
+                    supabase.table("jobs").update({"metadata": meta}).eq("job_id", job_id).execute()
+        except Exception as meta_err:
+            print(f"⚠️ Could not clear retry count for job {job_id}: {meta_err}")
+
+        # IMPORTANT: Manually dispatch SSE event to connected clients
+        # Don't rely only on Supabase Realtime (can be delayed)
+        try:
+            realtime_manager = get_realtime_manager()
+            
+            # Get updated job data for SSE dispatch
+            updated_job_response = supabase.table("jobs").select("*").eq("job_id", job_id).execute()
+            if updated_job_response.data:
+                updated_job = updated_job_response.data[0]
+                
+                # Dispatch to SSE clients
+                sse_payload = {
+                    "eventType": "UPDATE",
+                    "new": updated_job,
+                    "old": {},
+                    "data": {
+                        "record": updated_job,
+                        "type": "UPDATE"
+                    }
+                }
+                
+                realtime_manager._dispatch_event(job_id, sse_payload)
+                print(f"📡 Manually dispatched completion event to SSE clients for job {job_id}")
+        except Exception as sse_error:
+            print(f"⚠️ Error dispatching SSE event: {sse_error}")
 
     if result.get("success"):
         response = {"success": True}
@@ -1459,6 +1557,31 @@ def worker_fail_job(job_id):
     )
 
     if success:
+        # Manually dispatch SSE event to connected clients
+        try:
+            realtime_manager = get_realtime_manager()
+            
+            # Get updated job data for SSE dispatch
+            updated_job_response = supabase.table("jobs").select("*").eq("job_id", job_id).execute()
+            if updated_job_response.data:
+                updated_job = updated_job_response.data[0]
+                
+                # Dispatch to SSE clients
+                sse_payload = {
+                    "eventType": "UPDATE",
+                    "new": updated_job,
+                    "old": {},
+                    "data": {
+                        "record": updated_job,
+                        "type": "UPDATE"
+                    }
+                }
+                
+                realtime_manager._dispatch_event(job_id, sse_payload)
+                print(f"📡 Manually dispatched failure event to SSE clients for job {job_id}")
+        except Exception as sse_error:
+            print(f"⚠️ Error dispatching SSE event: {sse_error}")
+        
         return jsonify({"success": True}), 200
     else:
         return jsonify({"success": False, "error": "Failed to mark as failed"}), 500
@@ -1495,6 +1618,31 @@ def worker_reset_job(job_id):
     )
 
     if success:
+        # Manually dispatch SSE event to connected clients
+        try:
+            realtime_manager = get_realtime_manager()
+            
+            # Get updated job data for SSE dispatch
+            updated_job_response = supabase.table("jobs").select("*").eq("job_id", job_id).execute()
+            if updated_job_response.data:
+                updated_job = updated_job_response.data[0]
+                
+                # Dispatch to SSE clients
+                sse_payload = {
+                    "eventType": "UPDATE",
+                    "new": updated_job,
+                    "old": {},
+                    "data": {
+                        "record": updated_job,
+                        "type": "UPDATE"
+                    }
+                }
+                
+                realtime_manager._dispatch_event(job_id, sse_payload)
+                print(f"📡 Manually dispatched reset event to SSE clients for job {job_id}")
+        except Exception as sse_error:
+            print(f"⚠️ Error dispatching SSE event: {sse_error}")
+        
         return jsonify({"success": True}), 200
     else:
         return jsonify({"success": False, "error": "Failed to reset job"}), 500
@@ -1759,93 +1907,6 @@ def failover_status():
     
     failover_manager = get_failover_manager()
     return jsonify(failover_manager.get_status()), 200
-
-
-@app.route("/failover-events", methods=["GET"])
-def failover_events():
-    """
-    Server-Sent Events stream for real-time failover notifications
-    Clients connect to this endpoint to receive instant failover events
-    """
-    import queue
-    from failover_broadcast import add_client, remove_client, format_sse_message, get_connected_client_count
-    
-    def event_stream():
-        """Generator that yields SSE messages"""
-        # Create queue for this client
-        client_queue = queue.Queue(maxsize=10)
-        
-        # Register client
-        add_client(client_queue)
-        
-        try:
-            # Send initial connection message
-            yield format_sse_message({
-                "event": "connected",
-                "message": "Failover event stream connected",
-                "timestamp": datetime.utcnow().isoformat(),
-                "connected_clients": get_connected_client_count()
-            })
-            
-            # Send keepalive every 30 seconds and check for events
-            while True:
-                try:
-                    # Wait up to 30 seconds for an event
-                    event_data = client_queue.get(timeout=30)
-                    yield format_sse_message(event_data)
-                except queue.Empty:
-                    # Send keepalive ping
-                    yield format_sse_message({
-                        "event": "ping",
-                        "timestamp": datetime.utcnow().isoformat()
-                    })
-        except GeneratorExit:
-            # Client disconnected
-            pass
-        finally:
-            # Clean up
-            remove_client(client_queue)
-    
-    return Response(
-        stream_with_context(event_stream()),
-        mimetype='text/event-stream',
-        headers={
-            'Cache-Control': 'no-cache',
-            'Connection': 'keep-alive',
-            'X-Accel-Buffering': 'no'  # Disable nginx buffering
-        }
-    )
-
-
-@app.route("/test-failover", methods=["POST"])
-def test_failover():
-    """Test endpoint to manually trigger failover (for testing only)"""
-    from supabase_failover import get_failover_manager
-    
-    try:
-        data = request.get_json() or {}
-        reason = data.get("reason", "Manual test trigger")
-        
-        failover_manager = get_failover_manager()
-        success = failover_manager.trigger_failover(reason)
-        
-        if success:
-            return jsonify({
-                "success": True,
-                "message": "Failover triggered successfully",
-                "status": failover_manager.get_status()
-            }), 200
-        else:
-            return jsonify({
-                "success": False,
-                "message": "Failover trigger failed"
-            }), 500
-            
-    except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
 
 
 # Telegram endpoints removed - using direct Monetag postback only
@@ -2408,6 +2469,294 @@ def monetag_get_config():
         }), 500
 
 
+@app.route("/workflows/list", methods=["GET"])
+def list_workflows():
+    """
+    List all available workflows
+    
+    Returns:
+        200: List of workflows with metadata
+    """
+    try:
+        from workflow_manager import get_workflow_manager
+        
+        workflow_manager = get_workflow_manager()
+        workflows = workflow_manager.list_workflows()
+        
+        return jsonify({
+            "success": True,
+            "workflows": workflows
+        }), 200
+    
+    except Exception as e:
+        print(f"Failed to list workflows: {e}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route("/workflows/execute", methods=["POST"])
+@require_auth
+def execute_workflow():
+    """
+    Execute a workflow
+    
+    Request:
+        - workflow_id: Workflow ID
+        - file: Input file (multipart/form-data)
+        - options: Optional workflow options (JSON)
+    
+    Returns:
+        200: Job ID and execution ID
+    """
+    try:
+        from workflow_manager import get_workflow_manager
+        from jobs import create_job
+        import asyncio
+
+        maintenance_flag = Path(__file__).parent / ".maintenance_mode"
+        if maintenance_flag.exists():
+            return jsonify({
+                "success": False,
+                "error": "System is in maintenance mode. Please try again later."
+            }), 503
+
+        from supabase_failover import get_failover_manager
+        failover_manager = get_failover_manager()
+        if failover_manager.is_maintenance_mode:
+            return jsonify({
+                "success": False,
+                "error": "System is under maintenance. New workflow jobs are temporarily disabled."
+            }), 503
+
+        current_user = get_current_user()
+        user_id = current_user['user_id']
+        
+        print(f"📋 Workflow execution request - Form data: {dict(request.form)}")
+        print(f"📋 Files: {list(request.files.keys())}")
+        
+        workflow_id = request.form.get('workflow_id') or request.json.get('workflow_id')
+        
+        if not workflow_id:
+            return jsonify({
+                "success": False,
+                "error": "workflow_id is required"
+            }), 400
+        
+        workflow_manager = get_workflow_manager()
+        workflow = workflow_manager.get_workflow(workflow_id)
+        
+        if not workflow:
+            return jsonify({
+                "success": False,
+                "error": f"Workflow {workflow_id} not found"
+            }), 404
+        
+        input_file = None
+        input_image_url = None
+        
+        if 'file' in request.files:
+            input_file = request.files['file']
+            
+            # Upload file to Cloudinary and store URL for resume capability
+            from cloudinary_manager import get_cloudinary_manager
+            cloudinary = get_cloudinary_manager()
+            
+            try:
+                # Read file bytes from FileStorage object
+                file_bytes = input_file.read()
+                file_name = input_file.filename or 'workflow_input.jpg'
+                
+                upload_result = cloudinary.upload_image_from_bytes(
+                    file_bytes, 
+                    file_name,
+                    folder_name="workflow-inputs"
+                )
+                
+                if upload_result.get('success') is False:
+                    raise Exception(upload_result.get('error', 'Upload failed'))
+                
+                input_image_url = upload_result['secure_url']
+                print(f"📤 Uploaded workflow input image: {input_image_url}")
+            except Exception as upload_error:
+                print(f"⚠️ Failed to upload input image: {upload_error}")
+                # Reset file pointer for workflow to use
+                input_file.seek(0)
+        
+        job_result = create_job(
+            user_id=user_id,
+            prompt=f"Workflow: {workflow['name']}",
+            model=workflow_id,
+            job_type='workflow',
+            image_url=input_image_url,
+            aspect_ratio='1:1'
+        )
+        
+        if not job_result.get('success'):
+            return jsonify({
+                "success": False,
+                "error": job_result.get('error', 'Failed to create job')
+            }), 400
+        
+        job = job_result['job']
+        job_id = job['id']
+        
+        def run_workflow():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(
+                    workflow_manager.execute_workflow(
+                        workflow_id=workflow_id,
+                        input_data=input_image_url or input_file,
+                        user_id=user_id,
+                        job_id=job_id
+                    )
+                )
+            except Exception as e:
+                print(f"❌ Workflow execution error: {e}")
+            finally:
+                loop.close()
+        
+        import threading
+        thread = threading.Thread(target=run_workflow, daemon=True)
+        thread.start()
+        
+        return jsonify({
+            "success": True,
+            "job_id": job_id,
+            "stream_url": f"/jobs/{job_id}/stream"
+        }), 200
+    
+    except Exception as e:
+        print(f"❌ Failed to execute workflow: {e}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route("/workflows/retry/<job_id>", methods=["POST"])
+@require_auth
+def retry_workflow(job_id):
+    """
+    Retry a failed workflow from last checkpoint
+    
+    Returns:
+        200: Success message
+    """
+    try:
+        from workflow_manager import get_workflow_manager
+        import asyncio
+
+        maintenance_flag = Path(__file__).parent / ".maintenance_mode"
+        if maintenance_flag.exists():
+            return jsonify({
+                "success": False,
+                "error": "System is in maintenance mode. Please try again later."
+            }), 503
+
+        current_user = get_current_user()
+        user_id = current_user['user_id']
+        
+        response = supabase.table('workflow_executions')\
+            .select('*')\
+            .eq('job_id', job_id)\
+            .eq('user_id', user_id)\
+            .single()\
+            .execute()
+        
+        if not response.data:
+            return jsonify({
+                "success": False,
+                "error": "Workflow execution not found"
+            }), 404
+        
+        execution = response.data
+        
+        workflow_manager = get_workflow_manager()
+        
+        def run_retry():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(
+                    workflow_manager.resume_workflow(
+                        execution_id=execution['id'],
+                        job_id=job_id
+                    )
+                )
+            except Exception as e:
+                print(f"Workflow retry error: {e}")
+            finally:
+                loop.close()
+        
+        import threading
+        thread = threading.Thread(target=run_retry, daemon=True)
+        thread.start()
+        
+        return jsonify({
+            "success": True,
+            "message": "Workflow retry started",
+            "execution_id": execution['id'],
+            "resume_from_step": execution['current_step']
+        }), 200
+    
+    except Exception as e:
+        print(f"Failed to retry workflow: {e}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route("/workflows/execution/<job_id>", methods=["GET"])
+@require_auth
+def get_workflow_execution(job_id):
+    """
+    Get workflow execution details
+    
+    Returns:
+        200: Execution details with checkpoints
+    """
+    try:
+        current_user = get_current_user()
+        user_id = current_user['user_id']
+        
+        response = supabase.table('workflow_executions')\
+            .select('*')\
+            .eq('job_id', job_id)\
+            .eq('user_id', user_id)\
+            .single()\
+            .execute()
+        
+        if not response.data:
+            return jsonify({
+                "success": False,
+                "error": "Workflow execution not found"
+            }), 404
+        
+        execution = response.data
+        
+        can_retry = execution['status'] in ['pending_retry', 'failed']
+        
+        return jsonify({
+            "success": True,
+            "execution": {
+                **execution,
+                "can_retry": can_retry
+            }
+        }), 200
+    
+    except Exception as e:
+        print(f"Failed to get workflow execution: {e}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
 def startup_sync_worker():
     """
     Background worker for startup sync (non-blocking)
@@ -2629,6 +2978,65 @@ if __name__ == "__main__":
     # Admin Endpoints
     # ============================================
     
+    @app.route("/admin/priority-lock", methods=["POST"])
+    def admin_priority_lock():
+        """
+        Enable/disable priority lock mode remotely.
+        When enabled, job_worker_realtime.py will only process Priority 1 jobs.
+        Priority 2 and 3 jobs stay pending until lock is disabled.
+        Requires SECRET_KEY in Authorization header.
+        Body: {"enable": true/false}
+        """
+        try:
+            secret_key = os.getenv("SECRET_KEY")
+            if not secret_key:
+                return jsonify({"success": False, "error": "SECRET_KEY not configured"}), 500
+
+            auth_header = request.headers.get("Authorization")
+            if not auth_header or not auth_header.startswith("Bearer "):
+                return jsonify({"success": False, "error": "Unauthorized"}), 401
+
+            provided_secret = auth_header.replace("Bearer ", "")
+            if provided_secret != secret_key:
+                return jsonify({"success": False, "error": "Invalid secret key"}), 403
+
+            data = request.get_json() or {}
+            enable = data.get("enable", True)
+
+            supabase.table("system_flags").update({
+                "value": enable,
+                "updated_at": datetime.utcnow().isoformat()
+            }).eq("key", "priority_lock").execute()
+
+            if enable:
+                print("=" * 60)
+                print("PRIORITY LOCK ACTIVATED")
+                print("=" * 60)
+                print("Worker will only process Priority 1 jobs")
+                print("Priority 2 and 3 jobs held until lock is disabled")
+                print("=" * 60)
+                return jsonify({
+                    "success": True,
+                    "message": "Priority lock enabled. Only P1 jobs will be processed.",
+                    "mode": "enabled"
+                }), 200
+            else:
+                print("=" * 60)
+                print("PRIORITY LOCK DISABLED")
+                print("=" * 60)
+                print("Worker will resume processing all priority jobs")
+                print("Pending P2/P3 jobs will be flushed automatically by worker")
+                print("=" * 60)
+                return jsonify({
+                    "success": True,
+                    "message": "Priority lock disabled. All jobs will be processed.",
+                    "mode": "disabled"
+                }), 200
+
+        except Exception as e:
+            print(f"❌ Admin priority lock error: {e}")
+            return jsonify({"success": False, "error": str(e)}), 500
+
     @app.route("/admin/maintenance", methods=["POST"])
     def admin_maintenance():
         """
@@ -2750,6 +3158,52 @@ _Sent from Atool Contact Form_"""
             print(f"❌ Contact form error: {e}")
             return jsonify({"success": False, "error": str(e)}), 500
 
+    # Fix corrupted jobs (pending status but already has results)
+    def fix_corrupted_jobs():
+        """Fix jobs that have image_url/video_url but status is still 'pending'"""
+        try:
+            print("\n" + "="*60)
+            print("🔧 CHECKING FOR CORRUPTED JOBS")
+            print("="*60)
+            
+            # Find jobs with pending status but have image_url or video_url
+            response = supabase.table("jobs").select("job_id, image_url, video_url, status").eq("status", "pending").execute()
+            
+            if response.data:
+                corrupted_jobs = [job for job in response.data if job.get("image_url") or job.get("video_url")]
+                
+                if corrupted_jobs:
+                    print(f"Found {len(corrupted_jobs)} corrupted job(s) - fixing...")
+                    
+                    for job in corrupted_jobs:
+                        job_id = job["job_id"]
+                        try:
+                            # Update status to completed
+                            supabase.table("jobs").update({
+                                "status": "completed",
+                                "progress": 100,
+                                "error_message": None
+                            }).eq("job_id", job_id).execute()
+                            
+                            print(f"  ✅ Fixed job {job_id}")
+                        except Exception as fix_error:
+                            print(f"  ❌ Failed to fix job {job_id}: {fix_error}")
+                    
+                    print(f"✅ Fixed {len(corrupted_jobs)} corrupted job(s)")
+                else:
+                    print("✅ No corrupted jobs found")
+            else:
+                print("✅ No pending jobs found")
+            
+            print("="*60 + "\n")
+        except Exception as e:
+            print(f"❌ Error checking for corrupted jobs: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    # Run cleanup on startup
+    fix_corrupted_jobs()
+    
     # Check if startup sync is enabled
     enable_startup_sync = os.getenv("ENABLE_STARTUP_SYNC", "true").lower() == "true"
     

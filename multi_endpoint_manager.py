@@ -10,6 +10,9 @@ Routes generation requests to different API providers based on provider key:
 - vision-removebg → Remove.bg API
 - vision-bria → Bria AI Vision (Image generation and editing)
 - vision-infip → Infip.pro API (Async polling-based)
+- vision-deapi → deAPI (Async polling-based)
+- vision-leonardo, cinematic-leonardo → Leonardo AI (Async polling-based)
+- vision-stabilityai → Stability AI (Image upscaling)
 - cinematic-bria → Bria AI Cinematic (Video editing and generation)
 """
 
@@ -17,10 +20,83 @@ import os
 import time
 import requests
 import base64
+from urllib.parse import urlparse, unquote
 from dotenv_vault import load_dotenv
 import replicate
 
 load_dotenv()
+
+
+def get_image_format_from_url(url):
+    """
+    Detect image format from URL path extension or Cloudinary f_FORMAT transform params.
+    Returns lowercase format string: 'jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp', 'tiff', 'tif', 'avif', etc., or None.
+
+    Handles:
+      - Standard extension:   .../image.tiff
+      - Cloudinary f_FORMAT:  .../upload/f_tiff/v123/image
+      - Cloudinary combined:  .../upload/w_1024,f_png/v123/image
+      - Cloudinary f_auto:    returns None (format unknown)
+    """
+    if not url or not isinstance(url, str):
+        return None
+    try:
+        parsed = urlparse(url)
+        path = unquote(parsed.path).lower()
+
+        known_formats = ['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp', 'tiff', 'tif', 'avif',
+                         'mp4', 'webm', 'mov', 'avi', 'mkv']
+
+        for fmt in known_formats:
+            if path.endswith(f'.{fmt}'):
+                return fmt
+
+        for segment in path.split('/'):
+            for part in segment.split(','):
+                part = part.strip()
+                if part.startswith('f_') and part != 'f_auto':
+                    candidate = part[2:]
+                    if candidate in known_formats:
+                        return candidate
+
+        return None
+    except Exception:
+        return None
+
+
+def validate_image_format(url, allowed_formats, endpoint_name, is_video=False):
+    """
+    Validate that an image/video URL has a supported format for the given endpoint.
+    
+    Args:
+        url: The image/video URL (str or list of str)
+        allowed_formats: List of allowed lowercase extensions e.g. ['jpg', 'jpeg', 'png', 'webp']
+        endpoint_name: Name for error messages (e.g. '[RemoveBG]')
+        is_video: If True, validate video formats instead
+    
+    Raises:
+        Exception with INVALID_IMAGE_FORMAT prefix if format is not supported.
+    
+    Returns silently if format is supported or cannot be determined from URL.
+    """
+    urls = url if isinstance(url, list) else [url]
+    
+    for u in urls:
+        fmt = get_image_format_from_url(u)
+        if fmt is None:
+            print(f"{endpoint_name} Could not detect image format from URL: {u[:80]}... Proceeding (format will be validated by API).")
+            continue
+        
+        normalized = 'jpg' if fmt == 'jpeg' else fmt
+        normalized_allowed = ['jpg' if f == 'jpeg' else f for f in allowed_formats]
+        
+        if normalized not in normalized_allowed:
+            supported_str = ', '.join(f.upper() for f in allowed_formats)
+            raise Exception(
+                f"INVALID_IMAGE_FORMAT: {endpoint_name} does not support '{fmt.upper()}' format. "
+                f"Supported formats: {supported_str}. "
+                f"Please convert your image to one of the supported formats and try again."
+            )
 
 REPLICATE_MODELS = {
     'google/imagen-4': 'google/imagen-4',
@@ -77,6 +153,10 @@ KIE_MODELS = {
     
     # Video models (cinematic-pro)
     'kling-2.6': 'kling-2.6/image-to-video',
+    
+    # Grok Imagine models (cinematic-pro) - xAI Grok multimodal video generation
+    'grok-text-to-video': 'grok-imagine/text-to-video',
+    'grok-image-to-video': 'grok-imagine/image-to-video',
 }
 
 # Remove.bg Models - https://api.remove.bg/v1.0/removebg
@@ -142,6 +222,102 @@ DEAPI_MODELS = {
     'flux-schnell-deapi': 'Flux1schnell',  # Fast iteration model (1-10 steps)
 }
 
+# Leonardo AI Models - https://cloud.leonardo.ai/api/rest/v1 & v2
+# Note: All models require async polling (similar to Infip/deAPI)
+LEONARDO_MODELS = {
+    # V2 Image Models
+    'ideogram-3.0': 'ideogram-v3.0',  # Text rendering specialist (v2)
+    'nano-banana-pro-leonardo': 'gemini-image-2',  # Nano Banana Pro with image guidance (v2)
+    
+    # V2 Video Models
+    'seedance-1.0-pro-fast': 'seedance-1.0-pro-fast',  # Fast video generation (v2)
+    'seedance-1.0-lite': 'seedance-1.0-lite',  # Lite video generation (v2)
+    'seedance-1.0-pro': 'seedance-1.0-pro',  # Pro video generation (v2)
+    'hailuo-2.3-fast': 'hailuo-2.3-fast',  # Image-to-video fast generation (v2)
+    
+    # V1 Legacy Video Models
+    'motion-2.0': 'motion-2.0',  # Motion 2.0 image-to-video (v1 legacy)
+    'motion-2.0-fast': 'motion-2.0-fast',  # Motion 2.0 Fast image-to-video (v1 legacy)
+}
+
+# Stability AI Models - https://api.stability.ai/v2beta/stable-image
+# Note: Fast Upscaler costs only 2 credits (vs 40 for Conservative)
+STABILITYAI_MODELS = {
+    'stability-upscale-fast': 'fast',  # Fast upscaler (4x resolution in ~1s, 2 credits)
+}
+
+ENDPOINT_IMAGE_INPUT_SUPPORT = {
+    'replicate': {
+        'supported': True,
+        'notes': 'Per-model: imagen-4, flux-kontext-pro, flux-1.1-pro, ideogram-v3-turbo, flux-dev support optional image input. topazlabs/image-upscale, sczhou/codeformer, tencentarc/gfpgan REQUIRE image input.',
+        'models_requiring_image': ['topazlabs/image-upscale', 'sczhou/codeformer', 'tencentarc/gfpgan'],
+        'models_supporting_image': ['google/imagen-4', 'black-forest-labs/flux-kontext-pro', 'black-forest-labs/flux-1.1-pro', 'ideogram-ai/ideogram-v3-turbo', 'black-forest-labs/flux-dev', 'minimax/video-01'],
+    },
+    'pixazo': {
+        'supported': False,
+        'notes': 'flux-1-schnell is text-to-image only. No image input accepted.',
+    },
+    'huggingface': {
+        'supported': True,
+        'requires_image': True,
+        'notes': 'IllusionDiffusion REQUIRES a control image input.',
+    },
+    'rapidapi': {
+        'supported': True,
+        'notes': 'Passes image_urls array to API. image-to-image guidance is provider-dependent.',
+    },
+    'a4f': {
+        'supported': False,
+        'notes': 'OpenAI-compatible /images/generations is text-to-image only. No image editing endpoint currently exposed.',
+    },
+    'kie': {
+        'supported': True,
+        'notes': 'Image models accept input_urls. Video models (kling, grok) accept image_urls or input_urls for image-to-video.',
+    },
+    'removebg': {
+        'supported': True,
+        'requires_image': True,
+        'notes': 'REQUIRES input image. Returns image with background removed.',
+    },
+    'bria_vision': {
+        'supported': True,
+        'notes': 'Generation models (bria_image_generate*) do not need image. Editing models (bria_gen_fill, bria_erase, bria_remove_background, etc.) require image input.',
+        'models_requiring_image': ['bria_gen_fill', 'bria_erase', 'bria_remove_background', 'bria_replace_background', 'bria_blur_background', 'bria_erase_foreground', 'bria_expand', 'bria_enhance'],
+    },
+    'bria_cinematic': {
+        'supported': True,
+        'requires_image': True,
+        'notes': 'All Bria Cinematic models REQUIRE video input (passed as input_image_url).',
+    },
+    'xeven': {
+        'supported': True,
+        'notes': 'Only sdxl and sdxl-lightning support img2img via image_b64. flux-schnell, lucid-origin, phoenix are text-to-image only and will raise an error if image is provided.',
+        'models_supporting_image': ['sdxl-lightning', 'sdxl'],
+        'models_not_supporting_image': ['flux-schnell', 'lucid-origin', 'phoenix'],
+    },
+    'infip': {
+        'supported': False,
+        'notes': 'All Infip models use text-to-image via /images/generations only.',
+    },
+    'deapi': {
+        'supported': False,
+        'notes': 'txt2img endpoint is text-to-image only. deAPI has img2img endpoint but it is not integrated.',
+    },
+    'leonardo': {
+        'supported': True,
+        'notes': 'ideogram-3.0 is text-to-image only. nano-banana-pro-leonardo supports up to 6 image references. All video models (seedance, hailuo, motion-2.0) REQUIRE image input for image-to-video.',
+        'models_requiring_image': ['seedance-1.0-pro-fast', 'seedance-1.0-lite', 'seedance-1.0-pro', 'hailuo-2.3-fast', 'motion-2.0', 'motion-2.0-fast'],
+        'models_supporting_image': ['nano-banana-pro-leonardo'],
+        'models_not_supporting_image': ['ideogram-3.0'],
+    },
+    'stabilityai': {
+        'supported': True,
+        'requires_image': True,
+        'notes': 'stability-upscale-fast REQUIRES input image. Upscales to 4x resolution.',
+    },
+}
+
+
 PROVIDER_ROUTING = {
     'vision-nova': 'replicate',
     'vision-pixazo': 'pixazo',
@@ -154,10 +330,80 @@ PROVIDER_ROUTING = {
     'vision-xeven': 'xeven',
     'vision-infip': 'infip',
     'vision-deapi': 'deapi',
+    'vision-leonardo': 'leonardo',
+    'vision-stabilityai': 'stabilityai',
     'cinematic-nova': 'replicate',
     'cinematic-pro': 'kie',
     'cinematic-bria': 'bria_cinematic',
+    'cinematic-leonardo': 'leonardo',
 }
+
+
+PROVIDER_ALLOWED_IMAGE_FORMATS = {
+    'vision-replicate':     ['jpg', 'jpeg', 'png', 'webp', 'gif'],
+    'vision-huggingface':   ['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp'],
+    'vision-ultrafast':     ['jpg', 'jpeg', 'png', 'webp'],
+    'vision-kie':           ['jpg', 'jpeg', 'png', 'webp'],
+    'vision-flux':          ['jpg', 'jpeg', 'png', 'webp'],
+    'vision-removebg':      ['jpg', 'jpeg', 'png', 'webp'],
+    'vision-bria':          ['jpg', 'jpeg', 'png', 'webp'],
+    'vision-xeven':         ['jpg', 'jpeg', 'png', 'webp'],
+    'vision-leonardo':      ['jpg', 'jpeg', 'png', 'webp', 'gif'],
+    'vision-stabilityai':   ['jpg', 'jpeg', 'png', 'webp'],
+    'vision-atlas':         [],
+    'vision-pixazo':        [],
+    'vision-infip':         [],
+    'vision-deapi':         [],
+    'cinematic-nova':       ['jpg', 'jpeg', 'png', 'webp', 'gif'],
+    'cinematic-pro':        ['jpg', 'jpeg', 'png', 'webp'],
+    'cinematic-bria':       ['mp4', 'webm', 'mov'],
+    'cinematic-leonardo':   ['jpg', 'jpeg', 'png', 'webp', 'gif'],
+}
+
+
+def get_provider_allowed_formats(provider_key):
+    """Return list of allowed image/video formats for the given provider key, or None if unknown."""
+    return PROVIDER_ALLOWED_IMAGE_FORMATS.get(provider_key)
+
+
+def validate_workflow_image_formats(image_url, steps):
+    """
+    Validate that the user's input image is accepted by every generation step's provider.
+    Raises Exception with INVALID_IMAGE_FORMAT prefix on first violation.
+    Steps that are type 'input' or have no provider are skipped.
+    Only the FIRST generation step typically receives the user image directly;
+    subsequent steps receive AI-generated outputs (always jpg/png). We check all
+    generation steps for safety and future-proofing.
+    """
+    if not image_url:
+        return
+
+    first_only = True
+    for step in steps:
+        if step.get('type') != 'generation':
+            continue
+        provider = step.get('provider')
+        if not provider:
+            continue
+        allowed = PROVIDER_ALLOWED_IMAGE_FORMATS.get(provider)
+        if allowed is None:
+            continue
+        if len(allowed) == 0:
+            raise Exception(
+                f"INVALID_IMAGE_FORMAT: Provider '{provider}' (step: {step.get('name', '?')}) "
+                f"does not accept image input — it is a text-to-image only endpoint."
+            )
+        step_label = f"[{provider} / step:{step.get('name', '?')}]"
+        validate_image_format(image_url, allowed, step_label)
+        if first_only:
+            break
+
+
+def get_endpoint_image_support(provider_key):
+    endpoint = PROVIDER_ROUTING.get(provider_key)
+    if endpoint:
+        return ENDPOINT_IMAGE_INPUT_SUPPORT.get(endpoint)
+    return None
 
 
 def get_endpoint_type(provider_key, model_name=None):
@@ -188,6 +434,10 @@ def get_endpoint_type(provider_key, model_name=None):
             return 'infip'
         if model_name in DEAPI_MODELS:
             return 'deapi'
+        if model_name in LEONARDO_MODELS:
+            return 'leonardo'
+        if model_name in STABILITYAI_MODELS:
+            return 'stabilityai'
     return 'replicate'
 
 
@@ -198,6 +448,9 @@ def generate_with_replicate(prompt, model, aspect_ratio, api_key, input_image_ur
     client = replicate.Client(api_token=api_key)
     
     input_data = {"prompt": prompt}
+    
+    if input_image_url:
+        validate_image_format(input_image_url, ['jpg', 'jpeg', 'png', 'webp', 'gif'], '[Replicate]')
     
     if model == "google/imagen-4":
         # Imagen-4 only supports: 1:1, 9:16, 16:9, 3:4, 4:3
@@ -362,11 +615,17 @@ def generate_with_pixazo(prompt, model, aspect_ratio, api_key, input_image_url=N
     """
     Generate images using Pixazo API
     Supports multiple models including flux-1-schnell, SDXL, and Stable Diffusion variants
+    
+    IMAGE INPUT: NOT SUPPORTED - Pixazo (flux-1-schnell) is text-to-image only.
     """
     pixazo_model = PIXAZO_MODELS.get(model, model)
     
     print(f"[Pixazo] Running model: {pixazo_model}")
     print(f"[Pixazo] Aspect ratio: {aspect_ratio}")
+    
+    if input_image_url:
+        print(f"[Pixazo] WARNING: Image input is not supported by Pixazo (flux-1-schnell is text-to-image only). Input image will be ignored.")
+        raise Exception("IMAGE_NOT_SUPPORTED: Pixazo (flux-1-schnell) does not support image input. Please use a text-to-image prompt only, or switch to a different endpoint that supports image-to-image.")
     
     # Map aspect ratios to dimensions
     aspect_map = {
@@ -453,6 +712,8 @@ def generate_with_huggingface(prompt, model, aspect_ratio, api_key, input_image_
     # Validate input image
     if not input_image_url:
         raise Exception("IllusionDiffusion requires an input image")
+    
+    validate_image_format(input_image_url, ['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp'], '[HuggingFace]')
     
     try:
         import tempfile
@@ -550,6 +811,7 @@ def generate_with_rapidapi(prompt, model, aspect_ratio, api_key, input_image_url
     Generate images using RapidAPI's Ultra Fast Nano Banana model
     This is a fast and lightweight image generation API.
     Handles both URL and base64-encoded image responses.
+    Supports multiple reference images via input_image_url parameter (can be a single URL or list of URLs).
     """
     # RapidAPI host
     rapidapi_host = "ultra-fast-nano-banana-22.p.rapidapi.com"
@@ -563,9 +825,14 @@ def generate_with_rapidapi(prompt, model, aspect_ratio, api_key, input_image_url
         "prompt": prompt,
     }
     
-    # Add image URL if provided (for image-to-image)
+    # Add image URL(s) if provided (for image-to-image)
+    # Supports both single URL (string) and multiple URLs (list)
     if input_image_url:
-        payload["image_urls"] = [input_image_url]
+        validate_image_format(input_image_url, ['jpg', 'jpeg', 'png', 'webp'], '[RapidAPI]')
+        if isinstance(input_image_url, list):
+            payload["image_urls"] = input_image_url
+        else:
+            payload["image_urls"] = [input_image_url]
     
     headers = {
         "x-rapidapi-host": rapidapi_host,
@@ -577,7 +844,12 @@ def generate_with_rapidapi(prompt, model, aspect_ratio, api_key, input_image_url
     print(f"[RapidAPI] Host: {rapidapi_host}")
     print(f"[RapidAPI] Prompt: {prompt}")
     if input_image_url:
-        print(f"[RapidAPI] Image URL: {input_image_url}")
+        if isinstance(input_image_url, list):
+            print(f"[RapidAPI] Reference Images: {len(input_image_url)} images")
+            for idx, url in enumerate(input_image_url, 1):
+                print(f"[RapidAPI]   Image {idx}: {url[:100]}...")
+        else:
+            print(f"[RapidAPI] Reference Image: {input_image_url}")
     
     try:
         response = requests.post(
@@ -745,6 +1017,7 @@ def generate_with_xeven(prompt, model, aspect_ratio, api_key=None, input_image_u
     # Add image_b64 for img2img if input_image_url provided
     # Only SDXL and SDXL Lightning support img2img
     if input_image_url and xeven_model in ['sdxl-lightning', 'sdxl']:
+        validate_image_format(input_image_url, ['jpg', 'jpeg', 'png', 'webp'], '[Xeven]')
         try:
             print(f"[Xeven] Fetching input image for img2img: {input_image_url}")
             img_response = requests.get(input_image_url, timeout=30)
@@ -758,7 +1031,8 @@ def generate_with_xeven(prompt, model, aspect_ratio, api_key=None, input_image_u
         except Exception as e:
             print(f"[Xeven] Warning: Failed to process input image: {e}")
     elif input_image_url:
-        print(f"[Xeven] Note: Model {xeven_model} doesn't support img2img, ignoring input image")
+        print(f"[Xeven] WARNING: Model {xeven_model} does not support image input (only sdxl and sdxl-lightning support img2img). Input image will be rejected.")
+        raise Exception(f"IMAGE_NOT_SUPPORTED: Xeven model '{xeven_model}' does not support image input. Only 'sdxl' and 'sdxl-lightning' models support img2img. Please switch to sdxl-xeven or sdxl-lightning-xeven, or use a different endpoint.")
     
     print(f"[Xeven] Request URL: {base_url}")
     print(f"[Xeven] Request params: {params}")
@@ -828,12 +1102,18 @@ def generate_with_infip(prompt, model, aspect_ratio, api_key, input_image_url=No
     - flux2-dev: FLUX 2 Dev
     
     API returns task_id for async models, which requires polling via GET /v1/tasks/{task_id}
+    
+    IMAGE INPUT: NOT SUPPORTED - All Infip models use text-to-image via /images/generations only.
     """
     infip_model = INFIP_MODELS.get(model, model)
     base_url = "https://api.infip.pro/v1"
     
     print(f"[Infip] Running model: {infip_model}")
     print(f"[Infip] Aspect ratio: {aspect_ratio}")
+    
+    if input_image_url:
+        print(f"[Infip] WARNING: Image input is not supported by Infip models (text-to-image only). Input image will be ignored.")
+        raise Exception("IMAGE_NOT_SUPPORTED: Infip.pro models (z-image-turbo, qwen, flux2-klein-9b, flux2-dev) do not support image input. These are text-to-image models only. Please use a different endpoint for image-to-image tasks.")
     
     # Map aspect ratios to sizes
     # Infip supports: 1024x1024, 1792x1024, 1024x1792
@@ -982,12 +1262,19 @@ def generate_with_deapi(prompt, model, aspect_ratio, api_key, input_image_url=No
     1. POST /api/v1/client/txt2img → returns request_id
     2. Poll GET /api/v1/client/request-status/{request_id}
     3. Extract result_url when status = "done"
+    
+    IMAGE INPUT: NOT SUPPORTED - deAPI txt2img endpoint is text-to-image only.
+    deAPI has a separate img2img endpoint but it is not currently integrated.
     """
     deapi_model = DEAPI_MODELS.get(model, model)
     base_url = "https://api.deapi.ai/api/v1/client"
     
     print(f"[deAPI] Running model: {deapi_model}")
     print(f"[deAPI] Aspect ratio: {aspect_ratio}")
+    
+    if input_image_url:
+        print(f"[deAPI] WARNING: Image input is not supported by deAPI txt2img models. Input image will be ignored.")
+        raise Exception("IMAGE_NOT_SUPPORTED: deAPI models (ZImageTurbo_INT8, Flux1schnell) do not support image input via the current txt2img endpoint. These are text-to-image models only. Please use a different endpoint for image-to-image tasks.")
     
     # Map aspect ratios to width/height
     aspect_map = {
@@ -1132,12 +1419,19 @@ def generate_with_a4f(prompt, model, aspect_ratio, api_key, input_image_url=None
     """
     Generate images using A4F API (OpenAI-compatible endpoint)
     A4F provides unified access to image generation models
+    
+    IMAGE INPUT: NOT SUPPORTED - A4F uses the OpenAI-compatible /images/generations endpoint
+    which is text-to-image only. Image editing requires /images/edits (not exposed here).
     """
     a4f_model = A4F_MODELS.get(model, model)
     a4f_base_url = "https://api.a4f.co/v1"
     
     print(f"[A4F] Running model: {a4f_model}")
     print(f"[A4F] Aspect ratio: {aspect_ratio}")
+    
+    if input_image_url:
+        print(f"[A4F] WARNING: Image input is not supported by A4F image generation models (/images/generations is text-to-image only). Input image will be ignored.")
+        raise Exception("IMAGE_NOT_SUPPORTED: A4F image generation does not support image input. The /images/generations endpoint is text-to-image only. Please use a different endpoint (e.g., vision-bria, vision-replicate with flux-kontext-pro) for image-to-image tasks.")
     
     # Model-specific size support on A4F
     # Phoenix and SDXL-Lite only support 1024x1024
@@ -1173,9 +1467,6 @@ def generate_with_a4f(prompt, model, aspect_ratio, api_key, input_image_url=None
         "n": 1,
         "size": f"{dimensions['width']}x{dimensions['height']}"
     }
-    
-    if input_image_url:
-        payload["image"] = input_image_url
     
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -1255,6 +1546,9 @@ def generate_with_kie(prompt, model, aspect_ratio, api_key, input_image_url=None
         "prompt": prompt,
     }
     
+    if input_image_url:
+        validate_image_format(input_image_url, ['jpg', 'jpeg', 'png', 'webp'], '[KIE]')
+    
     # Image generation models
     if job_type == "image":
         input_data["aspect_ratio"] = kie_aspect
@@ -1265,12 +1559,26 @@ def generate_with_kie(prompt, model, aspect_ratio, api_key, input_image_url=None
     
     # Video generation models
     elif job_type == "video":
-        if input_image_url:
-            input_data["input_urls"] = [input_image_url]
+        # Grok Imagine models - text-to-video and image-to-video
+        if "grok-imagine" in kie_model.lower():
+            input_data["duration"] = "6"
+            input_data["resolution"] = "480p"
+            input_data["mode"] = "normal"
+            if input_image_url:
+                # image-to-video: use image_urls key (external image input)
+                input_data["image_urls"] = [input_image_url]
+            else:
+                # text-to-video: include aspect_ratio
+                input_data["aspect_ratio"] = kie_aspect
         
         # For kling-2.6/image-to-video
-        if "kling" in kie_model.lower():
+        elif "kling" in kie_model.lower():
+            input_data["input_urls"] = [input_image_url] if input_image_url else []
             input_data["mode"] = "720p"
+        
+        else:
+            if input_image_url:
+                input_data["input_urls"] = [input_image_url]
     
     # Create task payload
     payload = {
@@ -1379,6 +1687,8 @@ def generate_with_removebg(prompt, model, aspect_ratio, api_key, input_image_url
     if not input_image_url:
         raise Exception("Remove.bg requires an input image")
     
+    validate_image_format(input_image_url, ['jpg', 'jpeg', 'png', 'webp'], '[RemoveBG]')
+    
     url = "https://api.remove.bg/v1.0/removebg"
     
     payload = {
@@ -1446,6 +1756,9 @@ def generate_with_bria_vision(prompt, model, aspect_ratio, api_key, input_image_
     
     print(f"[BriaVision] Running model: {model}")
     print(f"[BriaVision] Endpoint: {endpoint_path}")
+    
+    if input_image_url:
+        validate_image_format(input_image_url, ['jpg', 'jpeg', 'png', 'webp'], '[BriaVision]')
     
     headers = {
         "api_token": api_key,
@@ -1762,6 +2075,9 @@ def generate_with_bria_cinematic(prompt, model, aspect_ratio, api_key, input_ima
     print(f"[BriaCinematic] Running model: {model}")
     print(f"[BriaCinematic] Endpoint: {endpoint_path}")
     
+    if input_image_url:
+        validate_image_format(input_image_url, ['mp4', 'webm', 'mov'], '[BriaCinematic]', is_video=True)
+    
     headers = {
         "api_token": api_key,
         "Content-Type": "application/json"
@@ -1933,6 +2249,568 @@ def generate_with_bria_cinematic(prompt, model, aspect_ratio, api_key, input_ima
         raise Exception(f"Bria Cinematic generation failed: {str(e)}")
 
 
+def generate_with_leonardo(prompt, model, aspect_ratio, api_key, input_image_url=None, job_type="image", duration=5, **kwargs):
+    """
+    Generate images/videos using Leonardo AI API
+    Supports both v2 image and video generation with async polling
+    
+    Models:
+    - ideogram-3.0: Text rendering specialist (v2 image)
+    - nano-banana-pro: Nano Banana Pro with image guidance support (v2 image)
+    - seedance-1.0-pro-fast: Fast video generation (v2 video)
+    """
+    leonardo_model = LEONARDO_MODELS.get(model)
+    
+    if not leonardo_model:
+        raise Exception(f"Unsupported Leonardo model: {model}")
+    
+    print(f"[Leonardo] Running model: {leonardo_model}")
+    print(f"[Leonardo] Job type: {job_type}")
+    print(f"[Leonardo] Aspect ratio: {aspect_ratio}")
+    
+    # Determine if this is image or video generation
+    is_video = model in ['seedance-1.0-pro-fast', 'seedance-1.0-lite', 'seedance-1.0-pro', 'hailuo-2.3-fast', 'motion-2.0', 'motion-2.0-fast']
+    is_nano_banana = model == 'nano-banana-pro-leonardo'
+    is_seedance = model in ['seedance-1.0-pro-fast', 'seedance-1.0-lite', 'seedance-1.0-pro']
+    is_hailuo = model == 'hailuo-2.3-fast'
+    is_motion = model in ['motion-2.0', 'motion-2.0-fast']
+    
+    # Video models REQUIRE input images (image-to-video only)
+    if is_video and not input_image_url:
+        raise Exception("Video models require an input image (image-to-video only). Upload an image first.")
+    
+    if input_image_url:
+        validate_image_format(input_image_url, ['jpg', 'jpeg', 'png', 'webp', 'gif'], '[Leonardo]')
+    
+    # Map aspect ratios to dimensions
+    if is_seedance:
+        # Seedance video dimensions (720p - 1080p doesn't support image reference!)
+        # Note: 1080p mode doesn't support start_frame images, so we use 720p
+        aspect_map = {
+            "1:1": {"width": 960, "height": 960},     # Square 720p
+            "16:9": {"width": 1248, "height": 704},   # Landscape 720p
+            "9:16": {"width": 704, "height": 1248},   # Portrait 720p
+            "4:3": {"width": 1120, "height": 832},    # 4:3 720p
+            "3:4": {"width": 832, "height": 1120},    # 3:4 720p
+            "21:9": {"width": 1504, "height": 640},   # Ultra-wide 720p
+            "3:2": {"width": 1152, "height": 768},    # Approximate 720p
+            "2:3": {"width": 768, "height": 1152},    # Approximate 720p
+        }
+    elif is_hailuo:
+        # Hailuo 2.3 Fast video dimensions (768p)
+        # Aspect ratio must be > 2:5 (0.4) and < 5:2 (2.5)
+        aspect_map = {
+            "1:1": {"width": 768, "height": 768},     # Square 768p
+            "16:9": {"width": 1366, "height": 768},   # Landscape 768p
+            "9:16": {"width": 768, "height": 1366},   # Portrait 768p
+            "4:3": {"width": 1024, "height": 768},    # 4:3 768p
+            "3:4": {"width": 768, "height": 1024},    # 3:4 768p
+            "21:9": {"width": 1792, "height": 768},   # Ultra-wide 768p
+            "3:2": {"width": 1152, "height": 768},    # 3:2 768p
+            "2:3": {"width": 768, "height": 1152},    # 2:3 768p
+        }
+    elif is_motion:
+        # Motion 2.0 and Motion 2.0 Fast video dimensions (720p)
+        # V1 Legacy API - supports: 9:16, 16:9, 2:3, 4:5
+        aspect_map = {
+            "9:16": {"width": 720, "height": 1152},   # Portrait 720p
+            "16:9": {"width": 1280, "height": 720},   # Landscape 720p
+            "2:3": {"width": 768, "height": 1152},    # 2:3 720p
+            "4:5": {"width": 864, "height": 1024},    # 4:5 720p
+        }
+    elif is_nano_banana:
+        # Nano Banana Pro supported dimensions: 0, 672, 768, 832, 864, 896, 1024, 1152, 1184, 1248, 1344
+        aspect_map = {
+            "1:1": {"width": 1024, "height": 1024},
+            "16:9": {"width": 1344, "height": 768},
+            "9:16": {"width": 768, "height": 1344},
+            "4:3": {"width": 1152, "height": 864},
+            "3:4": {"width": 864, "height": 1152},
+            "3:2": {"width": 1152, "height": 768},
+            "2:3": {"width": 768, "height": 1152},
+        }
+    else:
+        # Image dimensions (Ideogram 3.0)
+        aspect_map = {
+            "1:1": {"width": 1024, "height": 1024},
+            "16:9": {"width": 1792, "height": 1008},
+            "9:16": {"width": 1008, "height": 1792},
+            "4:3": {"width": 1536, "height": 1152},
+            "3:4": {"width": 1152, "height": 1536},
+            "3:2": {"width": 1536, "height": 1024},
+            "2:3": {"width": 1024, "height": 1536},
+        }
+    
+    dimensions = aspect_map.get(aspect_ratio, {"width": 1024, "height": 1024})
+    
+    headers = {
+        "accept": "application/json",
+        "authorization": f"Bearer {api_key}",
+        "content-type": "application/json"
+    }
+    
+    # Build request payload based on model type
+    if is_video:
+        # Video generation (Seedance, Hailuo, or Motion)
+        if is_motion:
+            # Motion 2.0 uses v1 legacy API
+            base_url = "https://cloud.leonardo.ai/api/rest/v1/generations-image-to-video"
+            # Allow custom resolution from kwargs, default to 720p
+            resolution_mode = kwargs.get('resolution', 'RESOLUTION_720')
+            actual_duration = 5  # Motion 2.0 has fixed duration
+        else:
+            # Seedance and Hailuo use v2 API
+            base_url = "https://cloud.leonardo.ai/api/rest/v2/generations"
+        
+        # Determine valid duration and resolution based on model
+        if is_seedance:
+            # Seedance: 4, 6, 8, or 10 seconds
+            valid_durations = [4, 6, 8, 10]
+            actual_duration = min(valid_durations, key=lambda x: abs(x - duration))
+            resolution_mode = "RESOLUTION_720"
+        elif is_hailuo:
+            # Hailuo: 6 or 10 seconds
+            valid_durations = [6, 10]
+            actual_duration = min(valid_durations, key=lambda x: abs(x - duration))
+            resolution_mode = "RESOLUTION_768"  # Default to 768p
+        
+        # Build payload based on API version
+        if is_motion:
+            # Motion 2.0 v1 API format
+            payload = {
+                "isPublic": False,
+                "resolution": resolution_mode,
+                "prompt": prompt,
+                "frameInterpolation": True,
+                "promptEnhance": False
+            }
+        else:
+            # V2 API format (Seedance, Hailuo)
+            payload = {
+                "model": leonardo_model,
+                "public": False,
+                "parameters": {
+                    "prompt": prompt,
+                    "width": dimensions["width"],
+                    "height": dimensions["height"],
+                    "duration": actual_duration,
+                    "quantity": 1,
+                    "mode": resolution_mode,
+                    "prompt_enhance": "OFF",
+                }
+            }
+        
+        # Add image reference if provided (image-to-video)
+        if input_image_url:
+            # Upload image to Leonardo and get image ID
+            print(f"[Leonardo] Uploading input image to Leonardo: {input_image_url}")
+            try:
+                # Step 1: Download the image
+                img_response = requests.get(input_image_url, timeout=30)
+                if img_response.status_code != 200:
+                    raise Exception(f"Failed to download input image: {img_response.status_code}")
+                
+                # Step 2: Get presigned upload URL from Leonardo
+                init_upload_response = requests.post(
+                    "https://cloud.leonardo.ai/api/rest/v1/init-image",
+                    headers={
+                        "accept": "application/json",
+                        "authorization": f"Bearer {api_key}",
+                        "content-type": "application/json"
+                    },
+                    json={"extension": "png"},
+                    timeout=30
+                )
+                
+                if init_upload_response.status_code != 200:
+                    raise Exception(f"Failed to init image upload: {init_upload_response.text}")
+                
+                upload_data = init_upload_response.json()
+                upload_url = upload_data["uploadInitImage"]["url"]
+                upload_fields_str = upload_data["uploadInitImage"]["fields"]
+                image_id = upload_data["uploadInitImage"]["id"]
+                
+                # Parse fields JSON string
+                import json
+                upload_fields = json.loads(upload_fields_str)
+                
+                print(f"[Leonardo] Got upload URL, uploading image (ID: {image_id})...")
+                
+                # Step 3: Upload image to presigned URL
+                files = {"file": ("image.png", img_response.content, "image/png")}
+                upload_response = requests.post(upload_url, data=upload_fields, files=files, timeout=60)
+                
+                if upload_response.status_code not in [200, 201, 204]:
+                    raise Exception(f"Failed to upload image: {upload_response.status_code}")
+                
+                print(f"[Leonardo] Image uploaded successfully, ID: {image_id}")
+                
+                # Step 4: Add image to payload
+                if is_motion:
+                    # Motion 2.0 v1 API format
+                    payload["imageId"] = image_id
+                    payload["imageType"] = "UPLOADED"
+                else:
+                    # V2 API format (Seedance, Hailuo)
+                    payload["parameters"]["guidances"] = {
+                        "start_frame": [
+                            {
+                                "image": {
+                                    "id": image_id,
+                                    "type": "UPLOADED"
+                                }
+                            }
+                        ]
+                    }
+                
+            except Exception as e:
+                print(f"[Leonardo] Error uploading image: {str(e)}")
+                raise Exception(f"Failed to upload input image to Leonardo: {str(e)}")
+    
+    else:
+        # Image generation (Ideogram 3.0 or Nano Banana Pro)
+        base_url = "https://cloud.leonardo.ai/api/rest/v2/generations"
+        
+        payload = {
+            "model": leonardo_model,
+            "public": False,
+            "parameters": {
+                "prompt": prompt,
+                "width": dimensions["width"],
+                "height": dimensions["height"],
+                "quantity": 1,
+            }
+        }
+        
+        # Nano Banana Pro specific parameters
+        if is_nano_banana:
+            payload["parameters"]["prompt_enhance"] = kwargs.get("prompt_enhance", "OFF")
+            
+            # Add style IDs if specified (Nano Banana Pro supports style presets)
+            style_ids = kwargs.get("style_ids")
+            if style_ids and isinstance(style_ids, list):
+                payload["parameters"]["style_ids"] = style_ids
+            elif kwargs.get("style_id"):
+                payload["parameters"]["style_ids"] = [kwargs.get("style_id")]
+            
+            # Add seed if specified
+            if kwargs.get("seed"):
+                payload["parameters"]["seed"] = kwargs["seed"]
+            
+            # Handle image guidance (up to 6 reference images)
+            if input_image_url:
+                # Check if input_image_url is a list of URLs or a single URL
+                image_urls_to_upload = input_image_url if isinstance(input_image_url, list) else [input_image_url]
+                
+                print(f"[Leonardo] Adding {len(image_urls_to_upload)} image reference(s) for Nano Banana Pro")
+                
+                try:
+                    # Initialize guidances
+                    payload["parameters"]["guidances"] = {"image_reference": []}
+                    image_strength = kwargs.get("image_strength", "MID")
+                    
+                    # Upload each image (limit to 6 as per API docs)
+                    for idx, img_url in enumerate(image_urls_to_upload[:6]):
+                        print(f"[Leonardo] Uploading reference image {idx + 1}/{len(image_urls_to_upload[:6])}: {img_url}")
+                        
+                        # Download image
+                        img_response = requests.get(img_url, timeout=30)
+                        if img_response.status_code != 200:
+                            print(f"[Leonardo] Warning: Failed to download image {idx + 1}: {img_response.status_code}")
+                            continue
+                        
+                        # Get presigned upload URL from Leonardo
+                        init_upload_response = requests.post(
+                            "https://cloud.leonardo.ai/api/rest/v1/init-image",
+                            headers={
+                                "accept": "application/json",
+                                "authorization": f"Bearer {api_key}",
+                                "content-type": "application/json"
+                            },
+                            json={"extension": "png"},
+                            timeout=30
+                        )
+                        
+                        if init_upload_response.status_code != 200:
+                            print(f"[Leonardo] Warning: Failed to init upload for image {idx + 1}: {init_upload_response.text}")
+                            continue
+                        
+                        upload_data = init_upload_response.json()
+                        upload_url = upload_data["uploadInitImage"]["url"]
+                        upload_fields_str = upload_data["uploadInitImage"]["fields"]
+                        image_id = upload_data["uploadInitImage"]["id"]
+                        
+                        import json
+                        upload_fields = json.loads(upload_fields_str)
+                        
+                        # Upload image to presigned URL
+                        files = {"file": ("image.png", img_response.content, "image/png")}
+                        upload_response = requests.post(upload_url, data=upload_fields, files=files, timeout=60)
+                        
+                        if upload_response.status_code not in [200, 201, 204]:
+                            print(f"[Leonardo] Warning: Failed to upload image {idx + 1}: {upload_response.status_code}")
+                            continue
+                        
+                        print(f"[Leonardo] Reference image {idx + 1} uploaded successfully (ID: {image_id})")
+                        
+                        # Add to guidances
+                        payload["parameters"]["guidances"]["image_reference"].append({
+                            "image": {
+                                "id": image_id,
+                                "type": "UPLOADED"
+                            },
+                            "strength": image_strength
+                        })
+                    
+                    # Check if at least one image was uploaded successfully
+                    if len(payload["parameters"]["guidances"]["image_reference"]) == 0:
+                        raise Exception("Failed to upload any reference images")
+                    
+                    print(f"[Leonardo] Successfully uploaded {len(payload['parameters']['guidances']['image_reference'])} reference image(s)")
+                    
+                except Exception as e:
+                    print(f"[Leonardo] Error uploading reference images: {str(e)}")
+                    raise Exception(f"Failed to upload reference images to Leonardo: {str(e)}")
+            
+            # Handle multiple reference images (if provided via reference_images kwarg)
+            reference_images = kwargs.get("reference_images")
+            if reference_images and isinstance(reference_images, list):
+                print(f"[Leonardo] Adding {len(reference_images)} reference images (max 6)")
+                if "guidances" not in payload["parameters"]:
+                    payload["parameters"]["guidances"] = {"image_reference": []}
+                
+                # Limit to 6 images as per API docs
+                for idx, ref_img in enumerate(reference_images[:6]):
+                    if isinstance(ref_img, dict) and "id" in ref_img:
+                        # Already uploaded image with ID
+                        payload["parameters"]["guidances"]["image_reference"].append({
+                            "image": {
+                                "id": ref_img["id"],
+                                "type": ref_img.get("type", "UPLOADED")
+                            },
+                            "strength": ref_img.get("strength", "MID")
+                        })
+        else:
+            # Ideogram 3.0 specific parameters
+            payload["parameters"]["mode"] = "TURBO"  # TURBO, BALANCED, or QUALITY
+            
+            # Add style preset if specified (optional)
+            style_id = kwargs.get("style_id")
+            if style_id:
+                payload["parameters"]["style_ids"] = [style_id]
+    
+    print(f"[Leonardo] Request URL: {base_url}")
+    print(f"[Leonardo] Request payload: {payload}")
+    
+    try:
+        # Step 1: Submit generation request
+        response = requests.post(
+            base_url,
+            headers=headers,
+            json=payload,
+            timeout=30
+        )
+        
+        print(f"[Leonardo] Response status: {response.status_code}")
+        
+        if response.status_code not in [200, 201]:
+            error_msg = f"Leonardo API error {response.status_code}: {response.text}"
+            print(f"[Leonardo] Error: {error_msg}")
+            raise Exception(error_msg)
+        
+        result = response.json()
+        print(f"[Leonardo] Create response: {result}")
+        
+        # Handle GraphQL error responses (returned as list)
+        if isinstance(result, list):
+            error_msg = "Leonardo API error: "
+            if len(result) > 0 and "message" in result[0]:
+                error_msg += result[0]["message"]
+                if "extensions" in result[0]:
+                    error_msg += f" (Code: {result[0]['extensions'].get('code', 'unknown')})"
+            else:
+                error_msg += str(result)
+            print(f"[Leonardo] GraphQL Error: {error_msg}")
+            raise Exception(error_msg)
+        
+        # Extract generation ID
+        # v2 API (Seedance, Hailuo) returns under "generate" key
+        # v1 API (Motion 2.0) returns under "motionVideoGenerationJob" key
+        if is_motion:
+            generation_id = result.get("motionVideoGenerationJob", {}).get("generationId")
+        else:
+            generation_id = result.get("generate", {}).get("generationId")
+        
+        if not generation_id:
+            raise Exception("Leonardo API did not return generationId")
+        
+        print(f"[Leonardo] Generation ID: {generation_id}")
+        
+        # Step 2: Poll for completion
+        max_attempts = 120 if is_video else 60  # 10 min for video, 5 min for image
+        poll_interval = 5  # 5 seconds
+        
+        status_url = f"https://cloud.leonardo.ai/api/rest/v1/generations/{generation_id}"
+        
+        for attempt in range(max_attempts):
+            time.sleep(poll_interval)
+            
+            status_response = requests.get(
+                status_url,
+                headers=headers,
+                timeout=30
+            )
+            
+            if status_response.status_code != 200:
+                print(f"[Leonardo] Status check failed: {status_response.status_code}")
+                continue
+            
+            status_result = status_response.json()
+            status = status_result.get("generations_by_pk", {}).get("status")
+            
+            print(f"[Leonardo] Status: {status} (attempt {attempt + 1}/{max_attempts})")
+            
+            if status == "COMPLETE":
+                generated_items = status_result.get("generations_by_pk", {}).get("generated_images", [])
+                
+                if not generated_items or len(generated_items) == 0:
+                    raise Exception("Leonardo generation completed but no images/videos found")
+                
+                # Get first item
+                first_item = generated_items[0]
+                
+                if is_video:
+                    # For video, check for motionMP4URL
+                    video_url = first_item.get("motionMP4URL")
+                    if video_url:
+                        print(f"[Leonardo] Video generation successful: {video_url}")
+                        return {"success": True, "url": video_url, "type": "video"}
+                    else:
+                        raise Exception("Leonardo video generation completed but no motionMP4URL found")
+                else:
+                    # For image, get URL
+                    image_url = first_item.get("url")
+                    if image_url:
+                        print(f"[Leonardo] Image generation successful: {image_url}")
+                        return {"success": True, "url": image_url, "type": "image"}
+                    else:
+                        raise Exception("Leonardo image generation completed but no URL found")
+            
+            elif status == "FAILED":
+                raise Exception("Leonardo generation failed")
+            
+            elif status in ["PENDING", "PROCESSING"]:
+                # Continue polling
+                continue
+            
+            else:
+                print(f"[Leonardo] Warning: Unknown status '{status}', continuing to poll...")
+        
+        raise Exception(f"Leonardo generation timeout after {max_attempts * poll_interval} seconds")
+        
+    except Exception as e:
+        print(f"[Leonardo] Error: {str(e)}")
+        raise Exception(f"Leonardo generation failed: {str(e)}")
+
+
+def generate_with_stabilityai(prompt, model, aspect_ratio, api_key, input_image_url=None, job_type="image", **kwargs):
+    """
+    Generate images using Stability AI Fast Upscaler
+    Cost: 2 credits per upscale
+    
+    Model:
+    - stability-upscale-fast: Fast upscaler (4x resolution in ~1s, 2 credits)
+    """
+    stabilityai_model = STABILITYAI_MODELS.get(model)
+    
+    if not stabilityai_model:
+        raise Exception(f"Unsupported Stability AI model: {model}")
+    
+    print(f"[StabilityAI] Running model: {stabilityai_model}")
+    print(f"[StabilityAI] Job type: {job_type}")
+    
+    # Upscale models require an input image
+    if not input_image_url:
+        raise Exception("Stability AI upscale models require an input image")
+    
+    validate_image_format(input_image_url, ['jpg', 'jpeg', 'png', 'webp'], '[StabilityAI]')
+    
+    # Fast upscaler endpoint
+    endpoint = "https://api.stability.ai/v2beta/stable-image/upscale/fast"
+    
+    try:
+        # Download the input image
+        print(f"[StabilityAI] Downloading input image: {input_image_url}")
+        img_response = requests.get(input_image_url, timeout=60)
+        
+        if img_response.status_code != 200:
+            raise Exception(f"Failed to download input image: {img_response.status_code}")
+        
+        image_data = img_response.content
+        image_size_mb = len(image_data) / (1024 * 1024)
+        print(f"[StabilityAI] Image size: {image_size_mb:.2f} MB")
+        
+        # Validate image size (max 10MB for Stability AI)
+        if image_size_mb > 10:
+            raise Exception(f"Input image too large ({image_size_mb:.2f} MB). Maximum is 10MB.")
+        
+        # Prepare multipart form data
+        files = {
+            'image': ('image.png', image_data, 'image/png')
+        }
+        
+        data = {
+            'prompt': prompt,
+            'output_format': kwargs.get('output_format', 'png')
+        }
+        
+        # Add optional parameters
+        if 'negative_prompt' in kwargs:
+            data['negative_prompt'] = kwargs['negative_prompt']
+        
+        if 'seed' in kwargs:
+            data['seed'] = kwargs['seed']
+        
+        headers = {
+            'authorization': f'Bearer {api_key}',
+            'accept': 'image/*'
+        }
+        
+        print(f"[StabilityAI] Sending upscale request to {endpoint}")
+        
+        response = requests.post(
+            endpoint,
+            headers=headers,
+            files=files,
+            data=data,
+            timeout=120
+        )
+        
+        if response.status_code == 200:
+            print(f"[StabilityAI] Upscale successful")
+            
+            # Response is the image bytes directly (PNG/JPEG)
+            upscaled_image_data = response.content
+            image_size_mb = len(upscaled_image_data) / (1024 * 1024)
+            print(f"[StabilityAI] Upscaled image size: {image_size_mb:.2f} MB")
+            
+            # Return raw bytes for Cloudinary upload (not base64)
+            return {
+                "success": True,
+                "is_raw_bytes": True,
+                "data": upscaled_image_data,
+                "type": "image"
+            }
+        else:
+            error_msg = response.text
+            print(f"[StabilityAI] Error {response.status_code}: {error_msg}")
+            raise Exception(f"Stability AI upscale failed {response.status_code}: {error_msg}")
+    
+    except Exception as e:
+        print(f"[StabilityAI] Error: {str(e)}")
+        raise Exception(f"Stability AI generation failed: {str(e)}")
+
+
 def generate(prompt, model, aspect_ratio, api_key, provider_key=None, input_image_url=None, job_type="image", duration=5, **kwargs):
     endpoint_type = get_endpoint_type(provider_key, model)
     
@@ -2063,5 +2941,217 @@ def generate(prompt, model, aspect_ratio, api_key, provider_key=None, input_imag
             job_type=job_type,
             duration=duration
         )
+    elif endpoint_type == "leonardo":
+        return generate_with_leonardo(
+            prompt=prompt,
+            model=model,
+            aspect_ratio=aspect_ratio,
+            api_key=api_key,
+            input_image_url=input_image_url,
+            job_type=job_type,
+            duration=duration,
+            **kwargs
+        )
+    elif endpoint_type == "stabilityai":
+        return generate_with_stabilityai(
+            prompt=prompt,
+            model=model,
+            aspect_ratio=aspect_ratio,
+            api_key=api_key,
+            input_image_url=input_image_url,
+            job_type=job_type,
+            **kwargs
+        )
     else:
         raise Exception(f"Unsupported endpoint type: {endpoint_type}")
+
+
+class EndpointManager:
+    """
+    Async wrapper for multi-endpoint generation functions
+    Used by workflow engine for model routing
+    """
+    
+    async def generate_image(self, prompt, model, provider_key, aspect_ratio='1:1', input_image_url=None, **kwargs):
+        """
+        Generate image with specified model and provider
+        Includes automatic API key rotation on provider errors
+        
+        Args:
+            prompt: Text prompt for generation
+            model: Model name to use
+            provider_key: Provider key (e.g., 'vision-ultrafast', 'cinematic-leonardo')
+            aspect_ratio: Image aspect ratio
+            input_image_url: Optional input image(s) for image-to-image
+            **kwargs: Additional parameters (steps, cfg, etc.)
+        
+        Returns:
+            dict with image_url or url key
+        
+        Raises:
+            Exception: If no API keys available or generation fails after rotation
+        """
+        import asyncio
+        from provider_api_keys import get_api_key_for_job
+        from api_key_rotation import handle_api_key_rotation, should_rotate_key
+        
+        print(f"🔍 [EndpointManager] generate_image - provider_key: {provider_key}, model: {model}")
+        
+        max_rotation_attempts = 5
+        attempt = 0
+        
+        while attempt < max_rotation_attempts:
+            attempt += 1
+            
+            api_key_data = get_api_key_for_job(model, provider_key=provider_key, job_type='image')
+            
+            if not api_key_data:
+                error_msg = f"NO_API_KEY_AVAILABLE: No API keys found for provider '{provider_key}'"
+                print(f"[EndpointManager] {error_msg}")
+                raise Exception(error_msg)
+            
+            api_key = api_key_data.get('api_key')
+            api_key_id = api_key_data.get('id')
+            
+            try:
+                loop = asyncio.get_event_loop()
+                result = await loop.run_in_executor(
+                    None,
+                    lambda: generate(
+                        prompt=prompt,
+                        model=model,
+                        aspect_ratio=aspect_ratio,
+                        api_key=api_key,
+                        provider_key=provider_key,
+                        input_image_url=input_image_url,
+                        job_type='image',
+                        **kwargs
+                    )
+                )
+                
+                return result
+                
+            except Exception as e:
+                error_message = str(e)
+                print(f"[EndpointManager] Generation error (attempt {attempt}/{max_rotation_attempts}): {error_message}")
+                
+                if should_rotate_key(error_message, provider_key):
+                    print(f"[EndpointManager] Error requires key rotation, attempting...")
+                    
+                    rotation_success, next_key = handle_api_key_rotation(
+                        api_key_id,
+                        provider_key,
+                        error_message,
+                        job_id=f"workflow-{model}"
+                    )
+                    
+                    if rotation_success and next_key:
+                        print(f"[EndpointManager] Rotation successful, retrying with new key...")
+                        continue
+                    else:
+                        print(f"[EndpointManager] Rotation failed or no keys available")
+                        raise Exception(f"NO_API_KEY_AVAILABLE: All API keys exhausted for provider '{provider_key}': {error_message}")
+                else:
+                    print(f"[EndpointManager] Error doesn't require rotation, re-raising...")
+                    raise
+        
+        raise Exception(f"Generation failed after {max_rotation_attempts} rotation attempts")
+    
+    async def generate_video(self, prompt, model, provider_key, input_image_url=None, duration=5, **kwargs):
+        """
+        Generate video with specified model and provider
+        Includes automatic API key rotation on provider errors
+        
+        Args:
+            prompt: Text prompt for generation
+            model: Model name to use
+            provider_key: Provider key (e.g., 'cinematic-leonardo')
+            input_image_url: Input image for image-to-video
+            duration: Video duration in seconds
+            **kwargs: Additional parameters
+        
+        Returns:
+            dict with video_url or url key
+        
+        Raises:
+            Exception: If no API keys available or generation fails after rotation
+        """
+        import asyncio
+        from provider_api_keys import get_api_key_for_job
+        from api_key_rotation import handle_api_key_rotation, should_rotate_key
+        
+        print(f"🔍 [EndpointManager] generate_video - provider_key: {provider_key}, model: {model}")
+        
+        # Extract aspect_ratio from kwargs to avoid duplicate argument
+        aspect_ratio = kwargs.pop('aspect_ratio', '16:9')
+        
+        max_rotation_attempts = 5
+        attempt = 0
+        
+        while attempt < max_rotation_attempts:
+            attempt += 1
+            
+            api_key_data = get_api_key_for_job(model, provider_key=provider_key, job_type='video')
+            
+            if not api_key_data:
+                error_msg = f"NO_API_KEY_AVAILABLE: No API keys found for provider '{provider_key}'"
+                print(f"[EndpointManager] {error_msg}")
+                raise Exception(error_msg)
+            
+            api_key = api_key_data.get('api_key')
+            api_key_id = api_key_data.get('id')
+            
+            try:
+                loop = asyncio.get_event_loop()
+                result = await loop.run_in_executor(
+                    None,
+                    lambda: generate(
+                        prompt=prompt,
+                        model=model,
+                        aspect_ratio=aspect_ratio,
+                        api_key=api_key,
+                        provider_key=provider_key,
+                        input_image_url=input_image_url,
+                        job_type='video',
+                        duration=duration,
+                        **kwargs
+                    )
+                )
+                
+                return result
+                
+            except Exception as e:
+                error_message = str(e)
+                print(f"[EndpointManager] Generation error (attempt {attempt}/{max_rotation_attempts}): {error_message}")
+                
+                if should_rotate_key(error_message, provider_key):
+                    print(f"[EndpointManager] Error requires key rotation, attempting...")
+                    
+                    rotation_success, next_key = handle_api_key_rotation(
+                        api_key_id,
+                        provider_key,
+                        error_message,
+                        job_id=f"workflow-{model}"
+                    )
+                    
+                    if rotation_success and next_key:
+                        print(f"[EndpointManager] Rotation successful, retrying with new key...")
+                        continue
+                    else:
+                        print(f"[EndpointManager] Rotation failed or no keys available")
+                        raise Exception(f"NO_API_KEY_AVAILABLE: All API keys exhausted for provider '{provider_key}': {error_message}")
+                else:
+                    print(f"[EndpointManager] Error doesn't require rotation, re-raising...")
+                    raise
+        
+        raise Exception(f"Generation failed after {max_rotation_attempts} rotation attempts")
+
+
+_endpoint_manager_instance = None
+
+def get_endpoint_manager():
+    """Get singleton instance of EndpointManager"""
+    global _endpoint_manager_instance
+    if _endpoint_manager_instance is None:
+        _endpoint_manager_instance = EndpointManager()
+    return _endpoint_manager_instance

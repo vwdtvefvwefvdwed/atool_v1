@@ -1,0 +1,51 @@
+{
+  "id": "got-style-img-to-img",
+  "name": "GOT Dragon Rider (4x Upscale)",
+  "description": "Transform your image into Game of Thrones cinematic dragon rider + fast 4x upscale (2 credits)",
+  "icon": "🐉",
+  "category": "transform",
+  "preview_video": null,
+  "preview_thumbnail": null,
+  "enabled": true,
+  "default_prompts": {
+    "image_edit": "Use Image A as a high-fidelity facial reference for likeness and fine features (not strict identity lock). Generate a true photorealistic cinematic close-up of a warrior riding a massive dark fantasy dragon in flight. Dragon face touches the camera with only half visible in frame, roaring with fire glow, wet detailed scales, and natural imperfections. Rider leans forward on the neck saddle, smiling naturally with direct eye contact to camera.\nFace realism priority:\npreserve fine facial feature likeness and proportions\ndetailed eyes, lips, and smile anatomy\nnatural skin pores, micro-wrinkles, subtle asymmetry\nrealistic teeth and lip texture when smiling\naccurate head scale vs shoulders\nSeamless face–body integration:\ncorrect neck thickness and jaw transition\ncontinuous skin tone face→neck→hands\nphysically correct lighting and shadow direction\nmatched exposure and color temperature\nreal contact shadows under chin and gear\nunified depth of field and lens focus\nno seams, halos, or cut-paste artifacts\nBody and gear:\nreal leather/metal armor with wear and micro-scratches\nanatomically correct posture and rein grip\nnatural wind in hair and clothing\nRendering constraints:\nphotographic realism only — not stylized, not CGI, not illustration\nreal cinema lens look, shallow DOF\nfilm color science, global illumination\nno cartoon shading, no plastic skin\nno blur, distortion, or AI artifacts\nultra-detailed, HDR, 8K, sharp focus",
+    "upscale": "Ultra high-resolution photorealistic dragon rider, sharp focus, intricate details, cinematic quality, 8K, HDR"
+  },
+  "supported_models": {
+    "image_edit": [
+      "nano-banana-pro-leonardo"
+    ],
+    "upscale": [
+      "stability-upscale-fast"
+    ]
+  },
+  "steps": [
+    {
+      "id": 0,
+      "name": "upload",
+      "type": "input",
+      "description": "Upload your input image",
+      "required_input": "image"
+    },
+    {
+      "id": 1,
+      "name": "image_edit",
+      "type": "generation",
+      "description": "AI-powered GOT dragon rider transformation",
+      "model_type": "image",
+      "default_model": "nano-banana-pro-leonardo",
+      "provider": "vision-leonardo"
+    },
+    {
+      "id": 2,
+      "name": "upscale",
+      "type": "generation",
+      "description": "Fast 4x upscale with Stability AI (2 credits)",
+      "model_type": "image",
+      "default_model": "stability-upscale-fast",
+      "provider": "vision-stabilityai"
+    }
+  ],
+  "estimated_duration_seconds": 60,
+  "credits_cost": 27
+}

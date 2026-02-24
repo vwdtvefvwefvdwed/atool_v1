@@ -1,0 +1,51 @@
+{
+  "id": "veiled-top-angle-portrait",
+  "name": "Veiled Top-Angle Portrait (4x Upscale)",
+  "description": "Transform your photo into a dramatic B&W top-down close-up with hair veiling the face and selective focus — film-grade monochrome + fast 4x upscale (2 credits)",
+  "icon": "🌑",
+  "category": "transform",
+  "preview_video": null,
+  "preview_thumbnail": null,
+  "enabled": true,
+  "default_prompts": {
+    "image_edit": "Use Image A as a high-fidelity facial reference for likeness and fine features (not strict identity lock). Generate a true photorealistic black-and-white close-up portrait of a young woman in a candid intimate pose captured from a high top-down camera angle — tight head-and-shoulders framing with the camera positioned above eye level looking downward. She must be wearing a modest high-neck dress that fully covers the neckline up to the base of the neck (no low-cut, no exposed chest, no transparent fabric), ensuring a clean, non-revealing look. One hand gently touches her forehead or hairline with fingers partially visible, while heavy loose hair strands fall forward and cover roughly half of the face, fully hiding one eye and eyebrow and masking much of that side of the face, with only the other eye, part of the nose, and part of the smile clearly visible. Enforce strong asymmetry with thick foreground hair crossing the face and creating layered depth and partial occlusion. Expression should be a soft natural smile, subtle and relaxed. Use shallow depth of field with selective focus only on the visible eye and lips, smooth background falloff, and gentle tonal transitions. Maintain realistic skin texture, natural pores, and fine hair strand detail while preserving core facial proportions from Image A with seamless blending and correct scale. Lighting should be soft, diffused, and directional from above, creating smooth highlight rolloff and shadow gradients. Do NOT use revealing clothing, NSFW elements, painterly or sketch effects, cartoon rendering, or plastic skin smoothing; enforce photographic realism, film-grade monochrome grading, 85mm portrait lens look, ultra-detailed clarity, authentic candid mood, and no AI artifacts.",
+    "upscale": "Ultra high-resolution black-and-white top-angle portrait, selective focus on visible eye and lips, fine hair strand detail, film-grade monochrome, 8K, HDR"
+  },
+  "supported_models": {
+    "image_edit": [
+      "nano-banana-pro-leonardo"
+    ],
+    "upscale": [
+      "stability-upscale-fast"
+    ]
+  },
+  "steps": [
+    {
+      "id": 0,
+      "name": "upload",
+      "type": "input",
+      "description": "Upload your input image",
+      "required_input": "image"
+    },
+    {
+      "id": 1,
+      "name": "image_edit",
+      "type": "generation",
+      "description": "AI-powered veiled top-angle portrait transformation",
+      "model_type": "image",
+      "default_model": "nano-banana-pro-leonardo",
+      "provider": "vision-leonardo"
+    },
+    {
+      "id": 2,
+      "name": "upscale",
+      "type": "generation",
+      "description": "Fast 4x upscale with Stability AI (2 credits)",
+      "model_type": "image",
+      "default_model": "stability-upscale-fast",
+      "provider": "vision-stabilityai"
+    }
+  ],
+  "estimated_duration_seconds": 60,
+  "credits_cost": 27
+}

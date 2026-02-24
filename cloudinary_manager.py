@@ -71,6 +71,56 @@ def sanitize_for_cloudinary(text):
     
     return sanitized
 
+# Official Cloudinary Upload/Admin API HTTP status codes:
+# 200 - OK
+# 400 - Bad request (invalid parameters) → do NOT rotate, bail immediately
+# 401 - Authorization required (bad credentials) → rotate account
+# 403 - Not allowed (quota exceeded, plan restriction) → rotate account
+# 404 - Not found → do NOT rotate
+# 420 - Rate limited (Cloudinary uses 420, NOT 429) → rotate account
+# 500 - Internal error (transient server error) → retry same account, do NOT rotate
+
+_CLOUDINARY_ROTATE_KEYWORDS = [
+    "420",                      # Cloudinary rate limit HTTP status code (official: 420, not 429)
+    "401",                      # Authorization required
+    "403",                      # Not allowed / quota/plan exceeded
+    "authorization required",   # 401 message
+    "not allowed",              # 403 message
+    "rate limit",               # rate limiting message
+    "too many requests",        # rate limiting
+    "quota",                    # quota exceeded
+    "storage limit",            # storage quota
+    "bandwidth limit",          # bandwidth quota
+    "bandwidth exceeded",
+    "storage exceeded",
+    "plan limit",               # plan restriction
+    "upgrade your plan",
+    "account is disabled",      # account blocked
+    "account suspended",
+]
+
+_CLOUDINARY_SKIP_RETRY_KEYWORDS = [
+    "400",          # Bad request — invalid parameters, rotation won't help
+    "bad request",
+    "invalid parameter",
+    "missing required",
+    "404",          # Not found — asset/resource missing, rotation won't help
+    "not found",
+]
+
+_CLOUDINARY_TRANSIENT_KEYWORDS = [
+    "500",              # Internal server error — transient, retry same account
+    "internal error",
+    "server error",
+    "timeout",
+    "timed out",
+    "connection",
+    "network",
+    "httpsconnectionpool",
+    "unable to connect",
+]
+
+
 class CloudinaryManager:
     """
     Manages multiple Cloudinary accounts with automatic rotation
@@ -223,7 +273,20 @@ class CloudinaryManager:
             response = requests.get(url, auth=auth, timeout=10)
             
             if response.status_code != 200:
-                print(f"[CLOUDINARY MANAGER] Usage check failed: {response.status_code}")
+                status = response.status_code
+                print(f"[CLOUDINARY MANAGER] Usage check failed for {account['name']}: HTTP {status}")
+
+                if status == 401:
+                    print(f"[CLOUDINARY MANAGER] ❌ Account {account['name']} has invalid credentials (401)")
+                    return {"over_threshold": True, "invalid_credentials": True}
+
+                if status in (403, 420):
+                    label = "quota/plan exceeded (403)" if status == 403 else "rate limited (420)"
+                    print(f"[CLOUDINARY MANAGER] ⚠️ Account {account['name']} {label}")
+                    return {"over_threshold": True, "invalid_credentials": False}
+
+                # 500 or anything else → transient server error, don't exclude the account
+                print(f"[CLOUDINARY MANAGER] Transient error ({status}), will still attempt uploads on this account")
                 return None
             
             data = response.json()
@@ -283,28 +346,48 @@ class CloudinaryManager:
     def rotate_to_next_account(self):
         """Switch to the next available account"""
         start_index = self.current_account_index
-        
-        # Try each account in sequence
+        fallback_index = None  # Best transient-error account to fall back to
+
         for i in range(len(self.accounts)):
             next_index = (start_index + i + 1) % len(self.accounts)
             next_account = self.accounts[next_index]
-            
+
             print(f"[CLOUDINARY MANAGER] Trying account {next_index + 1}: {next_account['name']}")
-            
-            # Check usage of this account
+
             usage = self.check_account_usage(next_account)
-            
-            if usage and not usage.get("over_threshold"):
-                # This account is good to use
-                self.current_account_index = next_index
-                self.configure_account(next_account)
-                print(f"[CLOUDINARY MANAGER] ✅ Switched to account: {next_account['name']}")
-                return True
-            else:
-                print(f"[CLOUDINARY MANAGER] ❌ Account {next_account['name']} not available")
-        
-        # All accounts are over threshold
-        print(f"[CLOUDINARY MANAGER] ⚠️  All accounts are over threshold! Using current: {self.get_current_account()['name']}")
+
+            if usage is None:
+                # Transient error (500/network) — usage API failed but uploads may still work.
+                # Keep as a fallback candidate rather than skipping immediately.
+                if fallback_index is None:
+                    fallback_index = next_index
+                print(f"[CLOUDINARY MANAGER] ⚠️ Account {next_account['name']} usage check failed (transient), marked as fallback")
+                continue
+
+            if usage.get("invalid_credentials"):
+                # 401 — credentials are definitively wrong, skip permanently for this rotation
+                print(f"[CLOUDINARY MANAGER] ❌ Account {next_account['name']} has invalid credentials, skipping")
+                continue
+
+            if usage.get("over_threshold"):
+                # 403/420 or quota exceeded — at capacity, skip
+                print(f"[CLOUDINARY MANAGER] ❌ Account {next_account['name']} is over threshold, skipping")
+                continue
+
+            # Account is healthy
+            self.current_account_index = next_index
+            self.configure_account(next_account)
+            print(f"[CLOUDINARY MANAGER] ✅ Switched to account: {next_account['name']}")
+            return True
+
+        # No healthy account found — use the transient-error fallback if available
+        if fallback_index is not None:
+            self.current_account_index = fallback_index
+            self.configure_account(self.accounts[fallback_index])
+            print(f"[CLOUDINARY MANAGER] ⚠️ All accounts at limit; using transient-fallback: {self.accounts[fallback_index]['name']}")
+            return True
+
+        print(f"[CLOUDINARY MANAGER] ⚠️  All accounts exhausted! Using current: {self.get_current_account()['name']}")
         return False
     
     def select_best_account(self):
@@ -313,22 +396,26 @@ class CloudinaryManager:
         Returns True if a good account is available
         """
         current = self.get_current_account()
-        
-        # Check current account usage
+
         usage = self.check_account_usage(current)
-        
-        if not usage:
-            print(f"[CLOUDINARY MANAGER] Could not check usage, using current account: {current['name']}")
+
+        if usage is None:
+            # Transient error (500/network) — proceed with current account optimistically
+            print(f"[CLOUDINARY MANAGER] Usage check unavailable (transient), proceeding with: {current['name']}")
             self.configure_account(current)
             return True
-        
+
+        if usage.get("invalid_credentials"):
+            print(f"[CLOUDINARY MANAGER] ❌ Current account {current['name']} has invalid credentials, rotating...")
+            return self.rotate_to_next_account()
+
         if usage.get("over_threshold"):
             print(f"[CLOUDINARY MANAGER] Current account {current['name']} is over threshold, rotating...")
             return self.rotate_to_next_account()
-        else:
-            print(f"[CLOUDINARY MANAGER] ✅ Current account {current['name']} is healthy")
-            self.configure_account(current)
-            return True
+
+        print(f"[CLOUDINARY MANAGER] ✅ Current account {current['name']} is healthy")
+        self.configure_account(current)
+        return True
     
     def upload_with_retry(self, upload_func, *args, **kwargs):
         """
@@ -345,6 +432,11 @@ class CloudinaryManager:
         
         for attempt in range(max_retries):
             try:
+                # Reset file-like objects to beginning before each attempt
+                for arg in args:
+                    if hasattr(arg, 'seek') and hasattr(arg, 'read'):
+                        arg.seek(0)
+                
                 # Select best account before upload
                 self.select_best_account()
                 
@@ -360,25 +452,30 @@ class CloudinaryManager:
             except Exception as e:
                 error_msg = str(e).lower()
                 current = self.get_current_account()
-                
+
                 print(f"[CLOUDINARY MANAGER] ❌ Upload failed on {current['name']}: {e}")
-                
-                # Check if error is quota/limit related
-                is_quota_error = any(keyword in error_msg for keyword in [
-                    "quota", "limit", "exceeded", "storage", "bandwidth"
-                ])
-                
-                if is_quota_error and attempt < max_retries - 1:
-                    print(f"[CLOUDINARY MANAGER] Quota error detected, rotating to next account...")
+
+                is_skip = any(kw in error_msg for kw in _CLOUDINARY_SKIP_RETRY_KEYWORDS)
+                is_transient = any(kw in error_msg for kw in _CLOUDINARY_TRANSIENT_KEYWORDS)
+                is_rotate = any(kw in error_msg for kw in _CLOUDINARY_ROTATE_KEYWORDS)
+
+                if is_skip:
+                    print(f"[CLOUDINARY MANAGER] Non-retryable error (bad request/not found), aborting.")
+                    raise
+                elif is_transient and attempt < max_retries - 1:
+                    print(f"[CLOUDINARY MANAGER] Transient error (server/network), retrying same account...")
+                    continue
+                elif is_rotate and attempt < max_retries - 1:
+                    print(f"[CLOUDINARY MANAGER] Auth/quota/rate-limit error (HTTP 401/403/420), rotating account...")
                     self.rotate_to_next_account()
                 elif attempt < max_retries - 1:
-                    print(f"[CLOUDINARY MANAGER] Error occurred, trying next account...")
+                    print(f"[CLOUDINARY MANAGER] Unknown error, trying next account...")
                     self.rotate_to_next_account()
                 else:
                     print(f"[CLOUDINARY MANAGER] All accounts failed!")
                     raise
     
-    def upload_image(self, image_path, folder_name="ai-generated-images", metadata=None):
+    def upload_image(self, image_path, folder_name="ai-generated-images", metadata=None, eager=None):
         """
         Upload an image to Cloudinary with automatic account rotation
         
@@ -386,6 +483,7 @@ class CloudinaryManager:
             image_path: Path to the image file
             folder_name: Folder name in Cloudinary
             metadata: Optional metadata dict
+            eager: Optional list of eager transformation dicts
         
         Returns:
             dict with upload result
@@ -407,6 +505,10 @@ class CloudinaryManager:
                 "overwrite": False,
                 "unique_filename": True
             }
+            
+            if eager:
+                upload_params["eager"] = eager
+                upload_params["eager_async"] = False
             
             # Add context metadata if provided
             if metadata:
@@ -449,12 +551,17 @@ class CloudinaryManager:
             
             current = self.get_current_account()
             print(f"[CLOUDINARY MANAGER] ✅ Image uploaded successfully to {current['name']}")
-            print(f"[CLOUDINARY MANAGER] URL: {upload_result['secure_url']}")
+            
+            # Always return original URL (without transformations) for full-quality downloads
+            final_secure_url = upload_result['secure_url']
+            final_url = upload_result['url']
+            
+            print(f"[CLOUDINARY MANAGER] URL: {final_secure_url}")
             
             return {
                 "success": True,
-                "public_url": upload_result['url'],
-                "secure_url": upload_result['secure_url'],
+                "public_url": final_url,
+                "secure_url": final_secure_url,
                 "file_name": file_name,
                 "public_id": upload_result['public_id'],
                 "width": upload_result.get('width'),
@@ -472,26 +579,77 @@ class CloudinaryManager:
                 "error": str(e)
             }
     
-    def upload_image_from_bytes(self, image_bytes, file_name, folder_name="ai-generated-images", metadata=None):
-        """Upload an image from bytes"""
+    def upload_image_from_bytes(self, image_bytes, file_name, folder_name="ai-generated-images", metadata=None, eager=None):
+        """Upload an image from bytes directly via BytesIO — no temp file needed"""
+        from io import BytesIO
         try:
-            # Create temporary file
-            with tempfile.NamedTemporaryFile(delete=False, suffix=Path(file_name).suffix) as tmp_file:
-                tmp_file.write(image_bytes)
-                tmp_path = tmp_file.name
-            
-            # Upload the temporary file
-            result = self.upload_image(tmp_path, folder_name, metadata=metadata)
-            
-            # Clean up temporary file
-            try:
-                os.unlink(tmp_path)
-            except:
-                pass
-            
-            return result
-            
+            print(f"[CLOUDINARY MANAGER] Uploading image: {file_name}")
+
+            upload_params = {
+                "folder": folder_name,
+                "resource_type": "image",
+                "overwrite": False,
+                "unique_filename": True,
+                "timeout": 120,
+            }
+
+            if eager:
+                upload_params["eager"] = eager
+                upload_params["eager_async"] = False
+
+            if metadata:
+                if 'prompt' in metadata:
+                    original_prompt = metadata['prompt']
+                    metadata['prompt'] = sanitize_for_cloudinary(original_prompt)
+                    if len(metadata['prompt']) > 1000:
+                        metadata['prompt'] = metadata['prompt'][:997] + "..."
+
+                context_pairs = []
+                for k, v in metadata.items():
+                    if v:
+                        safe_value = str(v).replace('|', '_').replace('=', '-')
+                        context_pairs.append(f"{k}={safe_value}")
+
+                if context_pairs:
+                    context_str = "|".join(context_pairs)
+                    if len(context_str) > 2000:
+                        context_str = context_str[:1997] + "..."
+                    upload_params["context"] = context_str
+
+            image_file = BytesIO(image_bytes)
+            image_file.seek(0)
+
+            upload_result = self.upload_with_retry(
+                cloudinary.uploader.upload,
+                image_file,
+                **upload_params
+            )
+
+            current = self.get_current_account()
+            print(f"[CLOUDINARY MANAGER] ✅ Image uploaded successfully to {current['name']}")
+
+            # Always return original URL (without transformations) for full-quality downloads
+            final_secure_url = upload_result['secure_url']
+            final_url = upload_result['url']
+
+            print(f"[CLOUDINARY MANAGER] URL: {final_secure_url}")
+
+            return {
+                "success": True,
+                "public_url": final_url,
+                "secure_url": final_secure_url,
+                "file_name": file_name,
+                "public_id": upload_result['public_id'],
+                "width": upload_result.get('width'),
+                "height": upload_result.get('height'),
+                "format": upload_result.get('format'),
+                "account_used": current['name']
+            }
+
         except Exception as e:
+            print(f"[CLOUDINARY MANAGER ERROR] Upload failed: {e}")
+            import traceback
+            traceback.print_exc()
             return {
                 "success": False,
                 "error": str(e)
