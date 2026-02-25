@@ -1506,6 +1506,56 @@ def reset_running_jobs_to_pending():
         return 0
 
 
+def validate_job_queue_state_on_startup():
+    """
+    On startup, check if the active job in job_queue_state is still actually running.
+    If the job is completed, failed, cancelled, or pending (already reset), clear the lock.
+    This handles cases where the worker restarted after a job finished but before the lock was cleared.
+    """
+    try:
+        from job_coordinator import get_job_coordinator
+        from supabase_client import supabase
+
+        print("\n" + "="*60)
+        print("STARTUP: Validating job_queue_state...")
+        print("="*60)
+
+        coordinator = get_job_coordinator()
+        state = coordinator.get_active_job_state()
+
+        if not state or not state.get('active_job_id'):
+            print("job_queue_state is clean (no active job)")
+            print("="*60 + "\n")
+            return
+
+        active_job_id = state.get('active_job_id')
+        print(f"Found active job in queue state: {active_job_id}")
+
+        job_response = supabase.table("jobs").select("job_id, status").eq("job_id", active_job_id).execute()
+
+        if not job_response.data:
+            print(f"Job {active_job_id} not found in main DB - clearing stale lock")
+            coordinator.clear_active_job()
+            print("✅ Cleared stale job_queue_state")
+            print("="*60 + "\n")
+            return
+
+        job_status = job_response.data[0].get("status")
+        print(f"Job {active_job_id} actual status: {job_status}")
+
+        if job_status in ("completed", "failed", "cancelled", "pending", "pending_retry"):
+            print(f"Job is '{job_status}' - not actually running. Clearing stale lock...")
+            coordinator.clear_active_job()
+            print("✅ Cleared stale job_queue_state")
+        else:
+            print(f"Job is still '{job_status}' - will be reset by reset_running_jobs_to_pending()")
+
+        print("="*60 + "\n")
+
+    except Exception as e:
+        print(f"⚠️  Error validating job_queue_state on startup: {e}")
+
+
 def fetch_all_pending_jobs():
     try:
         print("Fetching all pending jobs from database...")
@@ -2160,6 +2210,9 @@ def worker_startup_tasks():
         
         # Load priority lock state from Supabase
         _load_priority_lock_from_db()
+
+        # Validate job_queue_state - clear if active job is already done/reset
+        validate_job_queue_state_on_startup()
 
         # Reset stale running jobs
         reset_running_jobs_to_pending()
