@@ -144,9 +144,8 @@ def add_key(provider_name, api_key):
     """Add a key to a provider (auto-numbered)"""
     provider_id = get_provider_id(provider_name)
     
-    if not provider_id:
-        print(f"Error: Provider '{provider_name}' not found")
-        print("Use --add-provider to create it first")
+    if provider_id is None:
+        print(f"Error: Could not retrieve provider '{provider_name}' (check network/DNS and retry)")
         return
     
     keys = get_keys_for_provider(provider_id)

@@ -1480,6 +1480,16 @@ def reset_running_jobs_to_pending():
                 print(f"  ❌ Failed to reset job {job_id}: {update_error}")
         
         print(f"\n✅ Successfully reset {reset_count} job(s) to pending")
+        
+        if reset_count > 0:
+            try:
+                from job_coordinator import get_job_coordinator
+                coordinator = get_job_coordinator()
+                coordinator.clear_active_job()
+                print("✅ Cleared stale job_queue_state after worker restart")
+            except Exception as coord_error:
+                print(f"⚠️  Failed to clear job_queue_state: {coord_error}")
+        
         print("="*60 + "\n")
         return reset_count
         
