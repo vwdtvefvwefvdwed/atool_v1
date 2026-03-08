@@ -17,6 +17,7 @@ class BaseWorkflow(ABC):
         self.steps = config.get('steps', [])
         self.execution_id: Optional[str] = None
         self.checkpoints: Dict[str, Any] = {}
+        self.job_id: Optional[str] = None
     
     async def execute(
         self, 
@@ -29,8 +30,23 @@ class BaseWorkflow(ABC):
         execution = await self._get_or_create_execution(job_id, user_id, resume, input_data)
         self.execution_id = execution['id']
         self.checkpoints = execution.get('checkpoints', {})
+        self.job_id = job_id
         
-        start_step = execution['current_step'] if resume else 0
+        # Derive start_step from the execution record itself, not the `resume` flag.
+        # _get_or_create_execution() always reuses an existing execution when one is
+        # found.  If a running workflow was reset to pending by a worker restart and
+        # re-dispatched with resume=False, using `resume` to gate start_step would
+        # restart from step 0 and re-run already-completed API calls.  Instead, treat
+        # any execution with saved progress (current_step > 0 or completed checkpoints)
+        # as a resume, regardless of how this call was triggered.
+        has_saved_progress = (
+            execution.get('current_step', 0) > 0 or
+            any(
+                isinstance(v, dict) and v.get('status') == 'completed'
+                for v in self.checkpoints.values()
+            )
+        )
+        start_step = execution['current_step'] if (resume or has_saved_progress) else 0
         
         logger.info(f"Starting workflow {self.config['id']} from step {start_step}")
 
@@ -59,6 +75,7 @@ class BaseWorkflow(ABC):
                 
                 try:
                     logger.info(f"Executing step {i}: {step_name}")
+                    step_started_at = datetime.utcnow().isoformat()
                     result = await self._execute_step(step, i, execution, result)
                     
                     checkpoint_data = {
@@ -66,11 +83,12 @@ class BaseWorkflow(ABC):
                         'step_type': step.get('type'),
                         'status': 'completed',
                         'output': result,
-                        'started_at': datetime.utcnow().isoformat(),
+                        'started_at': step_started_at,
                         'completed_at': datetime.utcnow().isoformat()
                     }
                     
                     await self._save_checkpoint(execution['id'], i, checkpoint_data)
+                    await self._update_execution(execution['id'], {'current_step': i + 1})
                     
                     if step.get('type') == 'generation':
                         step_provider = step.get('provider')
@@ -228,6 +246,26 @@ class BaseWorkflow(ABC):
             
         except Exception as e:
             logger.error(f"Workflow execution failed: {e}")
+            # Guard: if this exception is NOT a RetryableError or HardError it means
+            # an infrastructure failure (e.g. DB error in _update_execution or
+            # _save_checkpoint) bubbled up without updating the job's DB status.
+            # The job would stay stuck in 'running' until the next worker restart.
+            # Reset it to 'pending_retry' so the periodic retry sweep picks it up.
+            if not isinstance(e, (RetryableError, HardError)):
+                try:
+                    await self._update_job_status(job_id, 'pending_retry', {
+                        'error': f"Infrastructure error: {str(e)[:200]}",
+                        'can_resume': True,
+                        'retryable': True
+                    })
+                    logger.warning(
+                        f"[BASE_WORKFLOW] Job {job_id} reset to pending_retry after "
+                        f"unexpected infrastructure error: {e}"
+                    )
+                except Exception as _status_err:
+                    logger.error(
+                        f"[BASE_WORKFLOW] Could not reset job {job_id} to pending_retry: {_status_err}"
+                    )
             raise
     
     async def _execute_step(self, step: Dict, step_index: int, execution: Dict, input_data: Any) -> Any:
@@ -243,8 +281,18 @@ class BaseWorkflow(ABC):
             
             if step_index > 0:
                 prev_output = await self._get_checkpoint_output(execution['id'], step_index - 1)
-                if prev_output:
+                if prev_output is not None:
                     input_data = prev_output
+                else:
+                    _step_model = step.get('model') or step.get('default_model', 'unknown')
+                    _step_provider = step.get('provider', 'unknown')
+                    raise RetryableError(
+                        f"Output from step {step_index - 1} is missing — cannot proceed to step {step_index}.",
+                        error_type='generic_api_error',
+                        retry_count=0,
+                        model=_step_model,
+                        provider=_step_provider
+                    )
             elif input_data is None:
                 stored_input = (execution.get('checkpoints') or {}).get('_input')
                 if stored_input:
@@ -272,7 +320,16 @@ class BaseWorkflow(ABC):
                     logger.warning(f"[QUOTA] Could not check quota for step '{step_name}': {quota_check_err}")
             
             try:
-                return await method(input_data, step)
+                step_timeout = step.get('timeout_seconds', 600)
+                return await asyncio.wait_for(method(input_data, step), timeout=step_timeout)
+            except asyncio.TimeoutError:
+                raise RetryableError(
+                    f"Step '{step_name}' timed out after {step_timeout}s",
+                    error_type='timeout',
+                    retry_count=0,
+                    model=step.get('model') or step.get('default_model', 'unknown'),
+                    provider=step.get('provider', 'unknown')
+                )
             except Exception as e:
                 error_msg = str(e)
                 error_msg_lower = error_msg.lower()
@@ -299,7 +356,7 @@ class BaseWorkflow(ABC):
                         context={"job_id": step_name, "provider": provider, "model": model}
                     )
                     raise RetryableError(
-                        f"No API keys available for {provider}. Workflow will retry when keys are added.",
+                        f"No API keys available for {provider} ({model}). Detail: {error_msg}",
                         error_type='no_api_key',
                         retry_count=0,
                         model=model,
@@ -313,7 +370,7 @@ class BaseWorkflow(ABC):
                         context={"provider": provider, "model": model, "error": error_msg[:200]}
                     )
                     raise RetryableError(
-                        f"Insufficient credits for {model}. Please add credits to your provider account.",
+                        f"Quota/credits exceeded for {provider} ({model}). Detail: {error_msg}",
                         error_type='quota_exceeded',
                         retry_count=0,
                         model=model,
@@ -322,7 +379,7 @@ class BaseWorkflow(ABC):
                 elif 'timeout' in error_msg_lower or 'timed out' in error_msg_lower:
                     logger.warning(f"Request timed out for {model}: {e}")
                     raise RetryableError(
-                        f"Request timed out for {model}",
+                        f"Request timed out for {provider} ({model}). Detail: {error_msg}",
                         error_type='timeout',
                         retry_count=0,
                         model=model,
@@ -331,7 +388,7 @@ class BaseWorkflow(ABC):
                 elif 'api key' in error_msg_lower or 'authentication' in error_msg_lower or 'unauthorized' in error_msg_lower:
                     logger.warning(f"API key issue for {provider}: {e}")
                     raise RetryableError(
-                        "Invalid or missing API key",
+                        f"API key error for {provider} ({model}). Detail: {error_msg}",
                         error_type='invalid_key',
                         retry_count=0,
                         model=model,
@@ -340,7 +397,7 @@ class BaseWorkflow(ABC):
                 else:
                     logger.error(f"Unhandled exception in step {step_name} for {provider}: {e}")
                     raise RetryableError(
-                        f"Unexpected error in step '{step_name}': {error_msg}",
+                        f"Unexpected error in step '{step_name}' for {provider} ({model}): {error_msg}",
                         error_type='generic_api_error',
                         retry_count=0,
                         model=model,
@@ -364,27 +421,34 @@ class BaseWorkflow(ABC):
             if existing.data:
                 existing_exec = existing.data
                 checkpoints = existing_exec.get('checkpoints') or {}
-                has_progress = any(
-                    v.get('status') == 'completed'
-                    for v in checkpoints.values()
-                    if isinstance(v, dict)
+                completed = sum(
+                    1 for v in checkpoints.values()
+                    if isinstance(v, dict) and v.get('status') == 'completed'
                 )
-                if resume or has_progress:
-                    logger.info(
-                        f"Resuming existing execution for job {job_id} "
-                        f"from step {existing_exec.get('current_step', 0)} "
-                        f"(completed checkpoints: {sum(1 for v in checkpoints.values() if isinstance(v, dict) and v.get('status') == 'completed')})"
-                    )
-                    # Backfill original input if it was never stored (e.g. old executions)
-                    if input_data is not None and '_input' not in checkpoints:
-                        checkpoints['_input'] = input_data
-                        supabase.table('workflow_executions')\
-                            .update({'checkpoints': checkpoints})\
-                            .eq('id', existing_exec['id'])\
-                            .execute()
-                        existing_exec['checkpoints'] = checkpoints
-                        logger.info(f"Backfilled original input for existing execution {existing_exec['id']}")
-                    return existing_exec
+                # Always reuse an existing execution record — never attempt to INSERT a
+                # second one for the same job_id.  The previous guard
+                #   `if resume or has_progress`
+                # incorrectly fell through to INSERT when an execution existed but had
+                # no completed checkpoints (e.g. a key-error on step 0).  That INSERT
+                # hit a unique-constraint violation and crashed the retry thread, leaving
+                # the job stuck in a permanent crash-loop on every subsequent API key
+                # insertion event.
+                logger.info(
+                    f"Reusing existing execution for job {job_id} "
+                    f"from step {existing_exec.get('current_step', 0)} "
+                    f"(completed checkpoints: {completed})"
+                )
+                # Backfill original input if it was never stored (e.g. old executions
+                # or first-step failures that never persisted the input checkpoint).
+                if input_data is not None and '_input' not in checkpoints:
+                    checkpoints['_input'] = input_data
+                    supabase.table('workflow_executions')\
+                        .update({'checkpoints': checkpoints})\
+                        .eq('id', existing_exec['id'])\
+                        .execute()
+                    existing_exec['checkpoints'] = checkpoints
+                    logger.info(f"Backfilled original input for existing execution {existing_exec['id']}")
+                return existing_exec
         except Exception as lookup_err:
             logger.warning(f"Could not look up existing execution for job {job_id}: {lookup_err}")
 
@@ -455,6 +519,23 @@ class BaseWorkflow(ABC):
 
         if status == 'failed' and metadata and 'error' in metadata:
             update_data['error_message'] = metadata['error']
+
+        if status == 'completed':
+            # Clear pending_retry_count accumulated during transient failures so
+            # the metadata does not carry stale retry bookkeeping on a completed job.
+            try:
+                meta_resp = supabase.table('jobs')\
+                    .select('metadata')\
+                    .eq('job_id', job_id)\
+                    .single()\
+                    .execute()
+                if meta_resp.data:
+                    _meta = meta_resp.data.get('metadata') or {}
+                    if 'pending_retry_count' in _meta:
+                        _meta.pop('pending_retry_count')
+                        update_data['metadata'] = _meta
+            except Exception as _meta_err:
+                logger.warning(f"[BASE_WORKFLOW] Could not clear pending_retry_count for {job_id}: {_meta_err}")
         
         if metadata:
             update_data['workflow_metadata'] = metadata
@@ -463,17 +544,26 @@ class BaseWorkflow(ABC):
             if 'result' in metadata and isinstance(metadata['result'], dict):
                 result = metadata['result']
                 
-                # If workflow result has video_url, set it in main job record
-                if 'video_url' in result:
-                    update_data['video_url'] = result['video_url']
+                # Video URL — any of these keys
+                video_url = (
+                    result.get('video_url') or
+                    result.get('output_video_url') or
+                    result.get('url') if isinstance(result.get('url'), str) and result.get('url', '').endswith('.mp4') else None
+                )
+                if video_url:
+                    update_data['video_url'] = video_url
                 
-                # If workflow result has edited_image_url (intermediate), set as image_url
-                if 'edited_image_url' in result:
-                    update_data['image_url'] = result['edited_image_url']
-                
-                # If workflow result has input_image (final step input), use that
-                elif 'input_image' in result:
-                    update_data['image_url'] = result['input_image']
+                # Image URL — ordered by specificity
+                image_url = (
+                    result.get('edited_image_url') or
+                    result.get('upscaled_image_url') or
+                    result.get('image_url') or
+                    result.get('output_url') or
+                    result.get('url') or
+                    result.get('input_image')
+                )
+                if image_url and not video_url:
+                    update_data['image_url'] = image_url
         
         supabase.table('jobs')\
             .update(update_data)\

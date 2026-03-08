@@ -42,8 +42,16 @@ class AvatarStyleImgToImgWorkflow(BaseWorkflow):
                 "width": result.get('width'),
                 "height": result.get('height')
             }
+        except HardError:
+            raise
         except Exception as e:
             logger.error(f"Failed to upload image: {e}")
+            _emsg = str(e).lower()
+            if any(t in _emsg for t in ['cloudinary', 'timeout', 'connection', 'network', 'upload', 'httpsconnectionpool']):
+                raise RetryableError(
+                    f"Transient upload error — will retry: {e}",
+                    error_type='timeout', retry_count=0, model='upload', provider='cloudinary'
+                )
             raise HardError(f"Failed to upload image: {e}")
 
     async def step_image_edit(self, input_data: Dict, step_config: Dict) -> Dict[str, Any]:
@@ -70,7 +78,8 @@ class AvatarStyleImgToImgWorkflow(BaseWorkflow):
             'model': model,
             'provider_key': provider,
             'input_image_url': [user_face_url, avatar_image_url],
-            'aspect_ratio': '1:1'
+            'aspect_ratio': '1:1',
+            'job_id': self.job_id
         }
 
         result = await endpoint_manager.generate_image(**generation_params)
@@ -101,7 +110,8 @@ class AvatarStyleImgToImgWorkflow(BaseWorkflow):
             'model': model,
             'provider_key': provider,
             'input_image_url': input_data['edited_image_url'],
-            'aspect_ratio': '1:1'
+            'aspect_ratio': '1:1',
+            'job_id': self.job_id
         }
 
         result = await endpoint_manager.generate_image(**generation_params)

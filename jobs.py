@@ -210,16 +210,26 @@ def create_job(user_id: str, prompt: str, model: str = "flux-dev",
                 "error": f"Job created but ID not returned. Fields: {list(job.keys())}"
             }
         
-        # Insert into appropriate priority queue
+        # Insert into appropriate priority queue (all job types: image, video, workflow)
+        request_payload = {
+            "prompt": prompt,
+            "model": model,
+            "aspect_ratio": aspect_ratio,
+            "negative_prompt": negative_prompt,
+            "job_type": job_type,
+        }
+        # Workflow and image-to-image jobs need the input image in the queue payload
+        if image_url:
+            request_payload["image_url"] = image_url
+        if mask_url:
+            request_payload["mask_url"] = mask_url
+        if job_type == "video" and duration:
+            request_payload["duration"] = duration
+
         queue_entry = {
             "user_id": user_id,
             "job_id": job_id,
-            "request_payload": {
-                "prompt": prompt,
-                "model": model,
-                "aspect_ratio": aspect_ratio,
-                "negative_prompt": negative_prompt
-            }
+            "request_payload": request_payload
         }
         
         # ✅ EDGE FUNCTION: Route to worker projects if enabled
@@ -268,7 +278,7 @@ def create_job(user_id: str, prompt: str, model: str = "flux-dev",
                 "priority": priority_level,
                 "generation_number": new_generation_count
             },
-            "credits_remaining": credits - 1
+            "credits_remaining": credits if UNLIMITED_MODE else credits - 1
         }
         
     except Exception as e:

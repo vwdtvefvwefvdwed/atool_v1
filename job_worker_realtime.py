@@ -137,6 +137,10 @@ MODELS_REQUIRING_INPUT_IMAGE_FOR_VIDEO = [
 # Priority lock - when True, only Priority 1 jobs are processed
 _priority_lock_active = False
 
+# Global semaphore: limits the total number of concurrent job processing threads.
+# Prevents unbounded thread creation under high load.
+_job_thread_semaphore = threading.BoundedSemaphore(40)
+
 def _load_priority_lock_from_db():
     """Load priority_lock flag from Supabase on startup"""
     global _priority_lock_active
@@ -171,15 +175,20 @@ def mark_provider_busy(provider_key, job_id):
 
 def mark_provider_free(provider_key, job_id):
     """Mark provider as free and process next queued job"""
-    if provider_active_jobs.get(provider_key) == job_id:
-        provider_active_jobs[provider_key] = None
-        print(f"[CONCURRENCY] Provider {provider_key} now FREE")
+    lock = get_provider_lock(provider_key)
+    freed = False
+    with lock:
+        if provider_active_jobs.get(provider_key) == job_id:
+            provider_active_jobs[provider_key] = None
+            freed = True
+            print(f"[CONCURRENCY] Provider {provider_key} now FREE")
+        else:
+            print(f"[CONCURRENCY] Warning: Job {job_id} tried to free {provider_key} but it's not the active job")
+    if freed:
         process_next_queued_job(provider_key)
-    else:
-        print(f"[CONCURRENCY] Warning: Job {job_id} tried to free {provider_key} but it's not the active job")
 
 def enqueue_job(provider_key, job):
-    """Add job to provider's queue"""
+    """Add job to provider's queue. MUST be called while holding the provider lock."""
     if provider_key not in provider_job_queues:
         provider_job_queues[provider_key] = []
     
@@ -306,6 +315,21 @@ def mark_job_failed(job_id, error_message):
             error_text = response.text[:200] if response.text else "No response body"
             print(f"[FAIL] Failed to mark job {job_id} as failed: {response.status_code} - {error_text}")
             return False
+    except (requests.exceptions.Timeout, requests.exceptions.RequestException) as req_error:
+        print(f"[FAIL] HTTP call failed ({req_error}) — falling back to direct DB update")
+        try:
+            from supabase_client import supabase as _sb
+            from datetime import datetime as _dt
+            _sb.table("jobs").update({
+                "status": "failed",
+                "error_message": error_message or "Unknown error",
+                "completed_at": _dt.utcnow().isoformat()
+            }).eq("job_id", job_id).execute()
+            print(f"[FAIL] Direct DB fallback succeeded for job {job_id}")
+            return True
+        except Exception as db_err:
+            print(f"[FAIL] Direct DB fallback also failed: {db_err}")
+            return False
     except Exception as e:
         print(f"[FAIL] Exception while marking job {job_id} as failed: {e}")
         return False
@@ -314,35 +338,90 @@ def mark_job_failed(job_id, error_message):
 MAX_PENDING_RETRIES = 5
 
 
+_NO_API_KEY_MARKERS = (
+    "no api key",
+    "no api key available",
+    "api key rotation failed",
+    "invalid key",
+    "authentication",
+    "unauthorized",
+)
+
+def _is_key_error(error_message: str) -> bool:
+    """Return True if the error is an API-key availability problem (not a transient network error)."""
+    msg = (error_message or "").lower()
+    return any(marker in msg for marker in _NO_API_KEY_MARKERS)
+
+def _is_quota_error(error_message: str) -> bool:
+    """Return True if the error is a quota/credit exhaustion problem.
+    Quota-exceeded jobs must NOT be retried with a 30s deferred loop — they should
+    wait for the periodic retry sweep (10 min) which fires after the quota has had
+    time to reset.  Immediate retries would burn through pending_retry_count in
+    ~2.5 minutes (5 × 30s) and permanently fail the job before the quota resets.
+    """
+    return "quota_exceeded" in (error_message or "").lower()
+
+
 def reset_job_to_pending(job_id, provider_key, error_message):
     """
     Mark a job as pending in the database so it can be retried.
     After MAX_PENDING_RETRIES attempts, marks the job as permanently failed
     to prevent infinite pending loops caused by persistent API errors.
+
+    For non-key errors (network, timeout, Cloudinary) a deferred retry thread is
+    spawned so the job is re-processed within ~30 s instead of waiting up to 10 min
+    for the periodic retry sweep.
+
+    For key-related errors the job stays pending silently — it will only be picked
+    up when a matching API key is inserted (api_key_realtime_listener).
     """
     if not job_id:
         print(f"[RESET] Cannot reset job: job_id is missing")
         return False
 
+    _retry_count_ok = False
     try:
-        supabase = get_worker1_client()
-        if supabase:
-            job_resp = supabase.table("jobs").select("metadata").eq("job_id", job_id).execute()
-            if job_resp.data:
-                meta = job_resp.data[0].get("metadata") or {}
-                retry_count = meta.get("pending_retry_count", 0)
-                if retry_count >= MAX_PENDING_RETRIES:
-                    print(f"[RESET] Job {job_id} has reached MAX_PENDING_RETRIES ({MAX_PENDING_RETRIES}) - marking as FAILED")
+        # The jobs table lives in the MAIN Supabase DB — use supabase_client.supabase,
+        # not get_worker1_client() which points to the Worker1 DB (different database).
+        # Using the wrong client causes every .table("jobs") query to silently fail or
+        # return empty results, meaning pending_retry_count is never read or incremented
+        # and MAX_PENDING_RETRIES is never enforced — allowing infinite retry loops.
+        from supabase_client import supabase as _main_sb
+        job_resp = _main_sb.table("jobs").select("metadata").eq("job_id", job_id).execute()
+        if job_resp.data:
+            meta = job_resp.data[0].get("metadata") or {}
+            retry_count = meta.get("pending_retry_count", 0)
+            if retry_count >= MAX_PENDING_RETRIES:
+                print(f"[RESET] Job {job_id} has reached MAX_PENDING_RETRIES ({MAX_PENDING_RETRIES}) - marking as FAILED")
+                mark_job_failed(
+                    job_id,
+                    f"Job failed after {MAX_PENDING_RETRIES} retry attempts. Last error: {error_message}"
+                )
+                return False
+            meta["pending_retry_count"] = retry_count + 1
+            _main_sb.table("jobs").update({"metadata": meta}).eq("job_id", job_id).execute()
+            print(f"[RESET] Job {job_id} pending retry {retry_count + 1}/{MAX_PENDING_RETRIES}")
+            _retry_count_ok = True
+    except Exception as count_err:
+        print(f"[RESET] Warning: could not check/update retry count for job {job_id}: {count_err}")
+
+    # If the count read/write failed, still enforce the cap via a direct metadata check
+    # so a persistent DB issue cannot allow infinite retries.
+    if not _retry_count_ok:
+        try:
+            from supabase_client import supabase as _main_sb2
+            _r = _main_sb2.table("jobs").select("metadata").eq("job_id", job_id).execute()
+            if _r and _r.data:
+                _meta = _r.data[0].get("metadata") or {}
+                if _meta.get("pending_retry_count", 0) >= MAX_PENDING_RETRIES:
+                    print(f"[RESET] Job {job_id} retry cap hit on fallback check — marking FAILED")
                     mark_job_failed(
                         job_id,
                         f"Job failed after {MAX_PENDING_RETRIES} retry attempts. Last error: {error_message}"
                     )
                     return False
-                meta["pending_retry_count"] = retry_count + 1
-                supabase.table("jobs").update({"metadata": meta}).eq("job_id", job_id).execute()
-                print(f"[RESET] Job {job_id} pending retry {retry_count + 1}/{MAX_PENDING_RETRIES}")
-    except Exception as count_err:
-        print(f"[RESET] Warning: could not check retry count for job {job_id}: {count_err}")
+        except Exception:
+            pass
 
     print(f"[RESET] Marking job {job_id} as pending...")
     
@@ -361,18 +440,63 @@ def reset_job_to_pending(job_id, provider_key, error_message):
         
         if response.status_code == 200:
             print(f"[RESET] Job {job_id} successfully marked as pending")
+
+            if _is_key_error(error_message):
+                print(f"[RESET] Key-related error — job {job_id} will wait for API key insertion")
+            elif _is_quota_error(error_message):
+                # Quota-exceeded: do NOT spawn a 30s deferred retry — the quota won't
+                # reset in 30s.  The periodic retry sweep (retry_transient_errors, every
+                # 10 min) will pick it up after the quota has had time to reset.
+                print(f"[RESET] Quota error — job {job_id} will wait for periodic sweep (quota reset)")
+            else:
+                # Non-key, non-quota transient error (network, timeout, Cloudinary):
+                # schedule a short-delay retry so the job is re-processed in ~30 s
+                # rather than waiting up to 10 min for the periodic retry sweep.
+                def _deferred_retry(jid=job_id):
+                    time.sleep(30)
+                    try:
+                        from supabase_client import supabase as _sb
+                        row = _sb.table("jobs").select("*").eq("job_id", jid).single().execute()
+                        if row.data and row.data.get("status") == "pending":
+                            print(f"[RESET-RETRY] Re-triggering job {jid} after 30s delay")
+                            process_job_with_concurrency_control(row.data)
+                        else:
+                            print(f"[RESET-RETRY] Job {jid} no longer pending — skipping deferred retry")
+                    except Exception as _e:
+                        print(f"[RESET-RETRY] Deferred retry failed for {jid}: {_e}")
+
+                threading.Thread(target=_deferred_retry, daemon=True).start()
+
             return True
         else:
             error_text = response.text[:200] if response.text else "No response body"
             print(f"[RESET] Failed to reset job {job_id}: {response.status_code} - {error_text}")
             return False
             
-    except requests.exceptions.Timeout:
-        print(f"[ERROR] Timeout while resetting job {job_id}")
-        return False
-    except requests.exceptions.RequestException as req_error:
-        print(f"[ERROR] Network error while resetting job {job_id}: {req_error}")
-        return False
+    except (requests.exceptions.Timeout, requests.exceptions.RequestException) as req_error:
+        print(f"[RESET] HTTP call failed ({req_error}) — falling back to direct DB update")
+        try:
+            from supabase_client import supabase as _sb
+            _sb.table("jobs").update({
+                "status": "pending",
+                "error_message": error_message or "Unknown error",
+                "progress": 0
+            }).eq("job_id", job_id).execute()
+            print(f"[RESET] Direct DB fallback succeeded for job {job_id}")
+            if not _is_key_error(error_message) and not _is_quota_error(error_message):
+                def _deferred_retry_fb(jid=job_id):
+                    time.sleep(30)
+                    try:
+                        row = _sb.table("jobs").select("*").eq("job_id", jid).single().execute()
+                        if row.data and row.data.get("status") == "pending":
+                            process_job_with_concurrency_control(row.data)
+                    except Exception as _e:
+                        print(f"[RESET-RETRY-FB] Deferred retry failed for {jid}: {_e}")
+                threading.Thread(target=_deferred_retry_fb, daemon=True).start()
+            return True
+        except Exception as db_err:
+            print(f"[RESET] Direct DB fallback also failed: {db_err}")
+            return False
     except Exception as reset_error:
         print(f"[ERROR] Unexpected error while resetting job {job_id}: {reset_error}")
         import traceback
@@ -537,21 +661,30 @@ def validate_job_inputs(job) -> bool:
 
 def retry_transient_errors():
     """
-    Retry pending jobs that failed with transient errors (Cloudinary, network, timeout, or no API key).
+    Retry pending jobs that failed with transient errors (Cloudinary, network, timeout).
     Called periodically by the worker main loop.
+
+    NOTE: API-key errors (no key, invalid key, rotation failed) are intentionally excluded.
+    Those jobs must only be re-triggered when a matching key is inserted via
+    api_key_realtime_listener → handle_api_key_insertion().
     """
     try:
         print("[RETRY] Checking for pending jobs with transient errors...")
-        
-        supabase = get_worker1_client()
-        if not supabase:
-            print("[RETRY] No Supabase client available")
-            return
-        
-        # Query pending jobs with error messages
-        result = supabase.table("jobs") \
-            .select("job_id, model, error_message, created_at") \
+
+        # Use the main Supabase client (jobs table lives in the main DB).
+        # get_worker1_client() returns the Worker1 DB client which may not have
+        # the jobs table — or may return None if Worker1 credentials are absent,
+        # causing the entire periodic sweep to silently stop working.
+        from supabase_client import supabase as _retry_sb
+
+        # Query pending, UNBLOCKED jobs with error messages.
+        # Coordinator-blocked jobs (blocked_by_job_id IS NOT NULL) must only be
+        # re-triggered by coordinator.process_next_queued_job() when their blocker
+        # finishes — not by the timer sweep.
+        result = _retry_sb.table("jobs") \
+            .select("job_id, model, error_message, created_at, updated_at") \
             .eq("status", "pending") \
+            .is_("blocked_by_job_id", "null") \
             .not_.is_("error_message", "null") \
             .order("created_at", desc=False) \
             .limit(50) \
@@ -568,33 +701,63 @@ def retry_transient_errors():
         retryable_count = 0
         for job in jobs:
             error_msg = (job.get("error_message") or "").lower()
+
+            # Skip API-key errors — these MUST only retry on key insertion, not on timer
+            if _is_key_error(error_msg):
+                print(f"[RETRY] Skipping job {job['job_id']} — key-related error, waiting for API key insertion")
+                continue
             
-            # Check if this is a transient error that should be retried
+            # Only retry genuinely transient infrastructure errors.
+            # quota_exceeded is included so that quota-reset jobs are picked up here
+            # (they are intentionally excluded from the 30s deferred retry in
+            # reset_job_to_pending() to avoid burning through retry attempts before
+            # the quota resets).
             is_transient = (
                 "cloudinary" in error_msg or
                 "timeout" in error_msg or
                 "timed out" in error_msg or
                 "connection" in error_msg or
                 "network" in error_msg or
-                "no api key available" in error_msg or
                 "httpsconnectionpool" in error_msg or
-                "unreachable" in error_msg
+                "unreachable" in error_msg or
+                "quota_exceeded" in error_msg
             )
-            
+
+            # Quota-exceeded jobs: only retry once the last attempt was ≥24h ago.
+            # Quota buckets reset daily; retrying sooner just wastes a retry slot.
+            if "quota_exceeded" in error_msg:
+                from datetime import timedelta
+                _last_ts = job.get("updated_at") or job.get("created_at")
+                if _last_ts:
+                    try:
+                        _last_dt = datetime.fromisoformat(_last_ts.replace("Z", "+00:00"))
+                        _elapsed = (datetime.utcnow() - _last_dt.replace(tzinfo=None)).total_seconds()
+                        if _elapsed < 86400:  # 24 hours
+                            print(f"[RETRY] Skipping quota-exceeded job {job['job_id']} — "
+                                  f"last attempt {_elapsed/3600:.1f}h ago, waiting for 24h quota reset")
+                            continue
+                    except Exception:
+                        pass  # if parse fails, allow the retry
+
             if is_transient:
                 retryable_count += 1
                 print(f"[RETRY] Retrying job {job['job_id']} ({job.get('model')}) - Error: {job.get('error_message', 'Unknown')[:80]}")
                 
                 # Fetch full job data and trigger processing
                 try:
-                    full_job_result = supabase.table("jobs") \
+                    full_job_result = _retry_sb.table("jobs") \
                         .select("*") \
                         .eq("job_id", job["job_id"]) \
                         .single() \
                         .execute()
                     
                     if full_job_result and hasattr(full_job_result, 'data') and full_job_result.data:
-                        on_new_job({"record": full_job_result.data})
+                        retry_thread = threading.Thread(
+                            target=process_job_with_concurrency_control,
+                            args=(full_job_result.data,),
+                            daemon=True
+                        )
+                        retry_thread.start()
                     else:
                         print(f"[RETRY] Could not fetch full job data for {job['job_id']}")
                 except Exception as api_err:
@@ -653,10 +816,8 @@ def on_new_job(payload):
 
 def process_job_with_concurrency_control(job):
     """
-    Wrapper for process_job that enforces model-based job coordination
-    - Checks with coordinator if job can start
-    - Queues job if model conflict detected
-    - Processes immediately if no conflict
+    Wrapper for process_job that enforces provider-level and coordinator-level
+    concurrency control. Also throttles total concurrent threads via semaphore.
     """
     job_id = job.get("job_id") or job.get("id")
     
@@ -667,6 +828,22 @@ def process_job_with_concurrency_control(job):
         print(f"[MAINTENANCE] Skipping job {job_id} - maintenance mode active")
         return None
 
+    # Global thread throttle — avoid creating unbounded threads under load
+    if not _job_thread_semaphore.acquire(timeout=10):
+        print(f"[THREAD LIMIT] Job {job_id} could not acquire thread slot within 10s — "
+              f"job remains pending in DB and will be retried by the periodic sweep")
+        return None
+
+    try:
+        return _process_job_with_concurrency_control_inner(job)
+    finally:
+        _job_thread_semaphore.release()
+
+
+def _process_job_with_concurrency_control_inner(job):
+    """Inner implementation of concurrency-controlled job processing."""
+    job_id = job.get("job_id") or job.get("id")
+
     # Check priority lock mode - only allow Priority 1 jobs
     if _priority_lock_active:
         metadata = job.get("metadata") or {}
@@ -675,70 +852,58 @@ def process_job_with_concurrency_control(job):
             print(f"[PRIORITY LOCK] Skipping priority {priority} job {job_id} - lock active, only P1 allowed")
             return None
 
-    # Determine job type and model
+    # Single authoritative input validation — runs exactly once regardless of
+    # which path (realtime, backlog, retry, coordinator re-trigger) dispatched
+    # this job. Removed from handle_new_job() and process_all_pending_jobs() to
+    # prevent duplicate mark_job_failed() calls and duplicate SSE events.
+    if not validate_job_inputs(job):
+        print(f"[VALIDATE] Job {job_id} failed input validation — marked as failed, aborting")
+        return None
+
     job_type = job.get("job_type", "image")
     model = job.get("model", "")
-    
-    # Extract required models
-    coordinator = get_job_coordinator()
-    
-    if job_type == "workflow":
-        # For workflows, we need to get the workflow config
-        # For now, skip coordinator for workflows (will be handled by workflow_manager)
-        print(f"[COORDINATOR] Workflow job {job_id} - skipping coordinator check (handled by workflow_manager)")
-        required_models = []
-    else:
-        # Normal job - single model
-        required_models = [model] if model else []
-    
-    # Only use coordinator for non-workflow jobs with models
-    if required_models:
-        print(f"[COORDINATOR] Checking if job {job_id} can start - Models: {required_models}")
-        
-        # Check with coordinator
-        start_result = coordinator.on_job_start(job_id, "normal", required_models)
-        
-        if not start_result['allowed']:
-            # Job is blocked - coordinator has already marked it as queued
-            print(f"[COORDINATOR] Job {job_id} blocked: {start_result['reason']}")
-            print(f"[COORDINATOR] Job will be automatically processed when blocking job completes")
-            return None
-        
-        print(f"[COORDINATOR] Job {job_id} allowed to start: {start_result['reason']}")
-    
-    # Determine provider (legacy concurrency control - can be removed later)
+
     metadata = job.get("metadata", {})
     provider_key = metadata.get("provider_key") or job.get("provider_key")
-    
+
     if not provider_key:
         video_indicators = ["video", "wan", "minimax", "luma", "topaz"]
         if job_type == "image" and any(v in model.lower() for v in video_indicators):
             job_type = "video"
         provider_key = map_model_to_provider(model, job_type=job_type)
-    
+
+    required_models = [] if job_type == "workflow" else ([model] if model else [])
+    coordinator = get_job_coordinator()
+
     lock = get_provider_lock(provider_key)
-    
+    coordinator_started = False
+
     with lock:
         if is_provider_busy(provider_key):
             print(f"[CONCURRENCY] Provider {provider_key} is BUSY, queueing job {job_id}")
             enqueue_job(provider_key, job)
-            # Clear coordinator state if we're not processing
-            if required_models:
-                coordinator.clear_active_job()
             return None
-        else:
-            mark_provider_busy(provider_key, job_id)
-    
+
+        if required_models:
+            print(f"[COORDINATOR] Checking if job {job_id} can start - Models: {required_models}")
+            start_result = coordinator.on_job_start(job_id, "normal", required_models)
+            if not start_result['allowed']:
+                print(f"[COORDINATOR] Job {job_id} blocked: {start_result['reason']}")
+                print(f"[COORDINATOR] Job will be automatically processed when blocking job completes")
+                return None
+            print(f"[COORDINATOR] Job {job_id} allowed to start: {start_result['reason']}")
+            coordinator_started = True
+
+        mark_provider_busy(provider_key, job_id)
+
     try:
         result = process_job(job)
         return result
     finally:
-        mark_provider_free(provider_key, job_id)
-        
-        # Notify coordinator that job completed
-        if required_models:
-            print(f"[COORDINATOR] Job {job_id} completed, checking for next queued job...")
+        if coordinator_started:
+            print(f"[COORDINATOR] Job {job_id} completed, notifying coordinator...")
             coordinator.on_job_complete(job_id, "normal")
+        mark_provider_free(provider_key, job_id)
 
 
 def process_job(job):
@@ -750,7 +915,19 @@ def process_job(job):
     if maintenance_flag.exists():
         print(f"[MAINTENANCE] Skipping job {job_id} - maintenance mode active")
         return None
-    
+
+    # Guard against processing jobs that were cancelled/failed while waiting in the queue
+    try:
+        from supabase_client import supabase as _sb
+        _status_resp = _sb.table("jobs").select("status").eq("job_id", job_id).single().execute()
+        if _status_resp.data:
+            _current_status = _status_resp.data.get("status")
+            if _current_status not in ("pending",):
+                print(f"[SKIP] Job {job_id} status is '{_current_status}' — no longer pending, skipping")
+                return None
+    except Exception as _status_err:
+        print(f"[SKIP-CHECK] Could not verify status for job {job_id}: {_status_err} — proceeding")
+
     job_type = job.get("job_type", "image")
     model = job.get("model", "")
     
@@ -763,8 +940,8 @@ def process_job(job):
     quota_manager = get_quota_manager()
     if not quota_manager.check_quota_available(provider_key, model):
         error_msg = f"QUOTA_EXCEEDED:{provider_key}:{model}"
-        print(f"[QUOTA] Model quota exceeded for {provider_key}:{model}")
-        mark_job_failed(job_id, error_msg)
+        print(f"[QUOTA] Model quota exceeded for {provider_key}:{model} — resetting to pending for retry")
+        reset_job_to_pending(job_id, provider_key, error_msg)
         return None
     
     video_indicators = ["video", "wan", "minimax", "luma", "topaz"]
@@ -966,14 +1143,37 @@ def process_video_job(job):
             except:
                 pass
         
-        complete_response = requests.post(
-            f"{BACKEND_URL}/worker/job/{job_id}/complete",
-            json={"image_url": final_url, "video_url": final_url, "success": True},
-            timeout=10,
-            verify=VERIFY_SSL
-        )
-        
-        if complete_response.status_code == 200:
+        _video_completed = False
+        try:
+            complete_response = requests.post(
+                f"{BACKEND_URL}/worker/job/{job_id}/complete",
+                json={"image_url": final_url, "video_url": final_url, "success": True},
+                timeout=10,
+                verify=VERIFY_SSL
+            )
+            if complete_response.status_code == 200:
+                _video_completed = True
+            else:
+                error_msg = f"Failed to mark job complete: {complete_response.status_code} - {complete_response.text[:200]}"
+                print(f"[COMPLETION ERROR] {error_msg}")
+        except Exception as _http_err:
+            print(f"[COMPLETION ERROR] HTTP call to /complete failed: {_http_err}")
+
+        if not _video_completed:
+            print(f"[COMPLETION FALLBACK] HTTP call failed — writing result directly to DB to preserve video URL")
+            try:
+                from jobs import update_job_result as _update_job_result
+                _fb = _update_job_result(job_id, image_url=final_url, video_url=final_url)
+                if _fb.get("success"):
+                    print(f"[COMPLETION FALLBACK] Direct DB update succeeded for video job {job_id}")
+                    _video_completed = True
+                else:
+                    raise Exception(_fb.get("error", "unknown"))
+            except Exception as _fb_err:
+                print(f"[COMPLETION FALLBACK] Direct DB fallback also failed: {_fb_err}")
+                raise Exception(f"Video generated but could not save result: {_fb_err}")
+
+        if _video_completed:
             print(f"Video job {job_id} completed successfully!")
             worker_status["jobs_processed"] += 1
             
@@ -990,10 +1190,6 @@ def process_video_job(job):
                 print(f"[QUOTA] ✓ Successfully incremented quota for {provider_key}:{job_model}")
             else:
                 print(f"[QUOTA] ✗ Failed to increment: {quota_result.get('reason', 'unknown')}")
-        else:
-            error_msg = f"Failed to mark job complete: {complete_response.status_code} - {complete_response.text[:200]}"
-            print(f"[COMPLETION ERROR] {error_msg}")
-            raise Exception(error_msg)
         
     except Exception as e:
         error_message = str(e)
@@ -1286,14 +1482,37 @@ def process_image_job(job):
             print(f"[Cloudinary] Upload error: {str(upload_error)}")
             raise Exception(f"Cloudinary upload error: {str(upload_error)}")
         
-        complete_response = requests.post(
-            f"{BACKEND_URL}/worker/job/{job_id}/complete",
-            json={"image_url": final_url, "thumbnail_url": final_url},
-            timeout=10,
-            verify=VERIFY_SSL
-        )
-        
-        if complete_response.status_code == 200:
+        _image_completed = False
+        try:
+            complete_response = requests.post(
+                f"{BACKEND_URL}/worker/job/{job_id}/complete",
+                json={"image_url": final_url, "thumbnail_url": final_url},
+                timeout=10,
+                verify=VERIFY_SSL
+            )
+            if complete_response.status_code == 200:
+                _image_completed = True
+            else:
+                error_msg = f"Failed to mark job complete: {complete_response.status_code} - {complete_response.text[:200]}"
+                print(f"[COMPLETION ERROR] {error_msg}")
+        except Exception as _http_err:
+            print(f"[COMPLETION ERROR] HTTP call to /complete failed: {_http_err}")
+
+        if not _image_completed:
+            print(f"[COMPLETION FALLBACK] HTTP call failed — writing result directly to DB to preserve image URL")
+            try:
+                from jobs import update_job_result as _update_job_result
+                _fb = _update_job_result(job_id, image_url=final_url, thumbnail_url=final_url)
+                if _fb.get("success"):
+                    print(f"[COMPLETION FALLBACK] Direct DB update succeeded for image job {job_id}")
+                    _image_completed = True
+                else:
+                    raise Exception(_fb.get("error", "unknown"))
+            except Exception as _fb_err:
+                print(f"[COMPLETION FALLBACK] Direct DB fallback also failed: {_fb_err}")
+                raise Exception(f"Image generated but could not save result: {_fb_err}")
+
+        if _image_completed:
             print(f"Job {job_id} completed successfully!")
             worker_status["jobs_processed"] += 1
             if api_key_id:
@@ -1308,10 +1527,6 @@ def process_image_job(job):
                 print(f"[QUOTA] ✓ Successfully incremented quota for {provider_key}:{model_name}")
             else:
                 print(f"[QUOTA] ✗ Failed to increment: {quota_result.get('reason', 'unknown')}")
-        else:
-            error_msg = f"Failed to mark job complete: {complete_response.status_code} - {complete_response.text[:200]}"
-            print(f"[COMPLETION ERROR] {error_msg}")
-            raise Exception(error_msg)
             
     except Exception as e:
         error_message = str(e)
@@ -1454,7 +1669,7 @@ def reset_running_jobs_to_pending():
         print("STARTUP: Resetting stale 'running' jobs to 'pending'")
         print("="*60)
         
-        running_jobs_response = supabase.table("jobs").select("job_id, user_id, model").eq("status", "running").execute()
+        running_jobs_response = supabase.table("jobs").select("job_id, user_id, model, job_type").eq("status", "running").execute()
         
         if not running_jobs_response.data or len(running_jobs_response.data) == 0:
             print("No 'running' jobs found - system is clean")
@@ -1467,14 +1682,21 @@ def reset_running_jobs_to_pending():
         reset_count = 0
         for job in running_jobs:
             job_id = job.get("job_id")
+            job_type = job.get("job_type", "image")
             try:
+                # Workflow jobs reset to pending_retry so the retry manager resumes
+                # them from their last saved checkpoint (current_step in
+                # workflow_executions).  Resetting to plain 'pending' would cause
+                # process_pending_workflows() to call execute_workflow(resume=False)
+                # which restarts from step 0, wasting already-completed API calls.
+                new_status = "pending_retry" if job_type == "workflow" else "pending"
                 supabase.table("jobs").update({
-                    "status": "pending",
+                    "status": new_status,
                     "progress": 0,
                     "error_message": "Worker restarted - job reset to pending"
                 }).eq("job_id", job_id).execute()
                 
-                print(f"  ✅ Reset job {job_id} to pending")
+                print(f"  ✅ Reset job {job_id} ({job_type}) to {new_status}")
                 reset_count += 1
             except Exception as update_error:
                 print(f"  ❌ Failed to reset job {job_id}: {update_error}")
@@ -1486,7 +1708,8 @@ def reset_running_jobs_to_pending():
                 from job_coordinator import get_job_coordinator
                 coordinator = get_job_coordinator()
                 coordinator.clear_active_job()
-                print("✅ Cleared stale job_queue_state after worker restart")
+                coordinator.process_next_queued_job()
+                print("✅ Cleared stale job_queue_state after worker restart and triggered next queued job")
             except Exception as coord_error:
                 print(f"⚠️  Failed to clear job_queue_state: {coord_error}")
         
@@ -1546,7 +1769,8 @@ def validate_job_queue_state_on_startup():
         if job_status in ("completed", "failed", "cancelled", "pending", "pending_retry"):
             print(f"Job is '{job_status}' - not actually running. Clearing stale lock...")
             coordinator.clear_active_job()
-            print("✅ Cleared stale job_queue_state")
+            coordinator.process_next_queued_job()
+            print("✅ Cleared stale job_queue_state and triggered next queued job")
         else:
             print(f"Job is still '{job_status}' - will be reset by reset_running_jobs_to_pending()")
 
@@ -1557,6 +1781,11 @@ def validate_job_queue_state_on_startup():
 
 
 def fetch_all_pending_jobs():
+    """
+    Fetch all pending image/video jobs for backlog catch-up.
+    Tries the backend HTTP API first; falls back to a direct Supabase query
+    if the backend is unavailable (e.g. race condition during deployment startup).
+    """
     try:
         print("Fetching all pending jobs from database...")
         response = requests.get(
@@ -1568,13 +1797,32 @@ def fetch_all_pending_jobs():
         if response.status_code == 200:
             data = response.json()
             jobs = data.get("jobs", [])
-            print(f"Found {len(jobs)} pending job(s)")
+            print(f"Found {len(jobs)} pending job(s) via backend API")
             return jobs
         else:
-            print(f"Failed to fetch pending jobs: {response.status_code}")
-            return []
+            print(f"Backend API returned {response.status_code} — falling back to direct DB query")
     except Exception as e:
-        print(f"Error fetching pending jobs: {e}")
+        print(f"[BACKLOG] Backend API unavailable ({e}) — falling back to direct DB query")
+
+    # Direct Supabase fallback — used when the backend HTTP server is not yet
+    # reachable (common at startup when both services start simultaneously).
+    # Exclude coordinator-blocked jobs — re-submitting them overwrites queued_at
+    # and corrupts FIFO ordering (same issue as Issues #14, #18, #20).
+    try:
+        from supabase_client import supabase as _sb
+        result = _sb.table("jobs")\
+            .select("*")\
+            .eq("status", "pending")\
+            .neq("job_type", "workflow")\
+            .is_("blocked_by_job_id", "null")\
+            .order("created_at", desc=False)\
+            .limit(200)\
+            .execute()
+        jobs = result.data if result and result.data else []
+        print(f"[BACKLOG] Found {len(jobs)} pending job(s) via direct DB fallback")
+        return jobs
+    except Exception as db_err:
+        print(f"[BACKLOG] Direct DB fallback also failed: {db_err}")
         return []
 
 
@@ -1612,10 +1860,6 @@ def process_all_pending_jobs():
         print(f"[{idx}/{len(non_workflow_jobs)}] Submitting job {job_id} ({job_type})")
         print(f"   Prompt: {prompt}...")
         
-        if not validate_job_inputs(job):
-            print(f"   Job {job_id} has missing required inputs — marked as failed, skipping\n")
-            continue
-        
         try:
             job_thread = threading.Thread(
                 target=process_job_with_concurrency_control,
@@ -1627,6 +1871,12 @@ def process_all_pending_jobs():
         except Exception as e:
             print(f"   Job {job_id} submission failed: {e}\n")
             continue
+        
+        # Small stagger: lets the coordinator lock settle between submissions so
+        # blocked jobs record their queued_at in order instead of all colliding
+        # simultaneously.  100ms × N jobs = negligible overhead for any realistic
+        # backlog size.
+        time.sleep(0.1)
     
     print("="*60)
     print("Image/video backlog catch-up completed (jobs queued per provider)")
@@ -1695,8 +1945,58 @@ async def realtime_listener():
                 job_type = record.get("job_type", "image")
                 
                 if job_type == "workflow":
-                    print(f"[WORKFLOW] Skipping workflow job {job_id} - handled by workflow manager")
+                    # Guard: UPDATE events for workflow jobs must NOT spawn a fresh
+                    # execution thread.  When the coordinator unblocks a queued workflow
+                    # (clear_job_queue_info sets blocked_by_job_id=NULL), Supabase Realtime
+                    # fires this UPDATE callback.  The coordinator has ALREADY pre-claimed
+                    # the slot and spawned a processing thread via _trigger_job_processing().
+                    # Starting a second thread here causes both threads to call
+                    # coordinator.on_job_start() → both see the self-reservation → both
+                    # get allowed=True → DOUBLE EXECUTION of the same workflow.
+                    #
+                    # For workflow UPDATE events we rely on:
+                    #   • coordinator.process_next_queued_job() for coordinator-unblocked jobs
+                    #   • workflow_retry_manager.retry_stale_pending_workflows() (2-min sweep)
+                    #     for jobs reset to pending after a transient / infrastructure error
+                    #
+                    # Only INSERT events (genuine new workflow submissions) should spawn here.
+                    _event_type = (
+                        payload.get("eventType")
+                        or payload.get("data", {}).get("eventType", "INSERT")
+                    )
+                    if _event_type == "UPDATE":
+                        print(
+                            f"[WORKFLOW] UPDATE event for {job_id} skipped — "
+                            f"coordinator or retry-manager will dispatch it"
+                        )
+                        sys.stdout.flush()
+                        return
+
+                    print(f"[WORKFLOW] New workflow job {job_id} received via realtime — routing to workflow manager")
                     sys.stdout.flush()
+
+                    def _start_new_workflow():
+                        import asyncio as _asyncio
+                        from workflow_manager import get_workflow_manager
+                        _loop = _asyncio.new_event_loop()
+                        _asyncio.set_event_loop(_loop)
+                        try:
+                            _wm = get_workflow_manager()
+                            _meta = record.get('metadata', {}) or {}
+                            _img = record.get('image_url') or _meta.get('input_image_url')
+                            _loop.run_until_complete(_wm.execute_workflow(
+                                workflow_id=record.get('model'),
+                                input_data=_img,
+                                user_id=record.get('user_id'),
+                                job_id=job_id
+                            ))
+                        except Exception as _wf_err:
+                            print(f"[WORKFLOW] New workflow {job_id} failed: {_wf_err}")
+                        finally:
+                            _loop.close()
+
+                    from workflow_retry_manager import _spawn_workflow_thread
+                    _spawn_workflow_thread(_start_new_workflow, name=f"NewWF-{job_id}")
                     return
                 
                 print(f"\n{'='*70}")
@@ -1708,11 +2008,6 @@ async def realtime_listener():
                 print(f"{'='*70}\n")
                 sys.stdout.flush()
 
-                if not validate_job_inputs(record):
-                    print(f"Job {job_id} has missing required inputs — marked as failed immediately")
-                    sys.stdout.flush()
-                    return
-                
                 def process_in_thread():
                     try:
                         process_job_with_concurrency_control(record)
@@ -1808,6 +2103,20 @@ async def realtime_listener():
         
         print(f"Subscription result: {subscription_result}")
         print("Subscribed to new job INSERT events (Realtime active)")
+
+        # Also subscribe to UPDATE events so that jobs reset to 'pending' (e.g. after
+        # reset_job_to_pending() which does an UPDATE, not an INSERT) are picked up
+        # immediately instead of waiting for the 30s deferred retry or 10-min sweep.
+        # handle_new_job() already guards status != 'pending' and re-checks DB status
+        # inside process_job(), so duplicate processing is prevented.
+        update_channel = async_client.channel("job-worker-pending-updates")
+        await update_channel.on_postgres_changes(
+            event="UPDATE",
+            schema="public",
+            table="jobs",
+            callback=handle_new_job
+        ).subscribe()
+        print("Subscribed to job UPDATE events (catches reset-to-pending jobs)")
         print()
         print("NOTE: If events don't arrive, check Supabase Dashboard:")
         print("   Database -> Replication -> Enable Realtime for 'jobs' table")
@@ -1848,18 +2157,41 @@ def fetch_pending_jobs_for_provider(provider_key: str) -> list:
 
         print(f"[API_KEY_INSERT] Querying pending image/video jobs for provider: {provider_key}")
 
+        # Exclude coordinator-blocked jobs (blocked_by_job_id IS NOT NULL).
+        # Those are queued behind another running job and must be triggered by
+        # coordinator.process_next_queued_job() — not by the key-insertion handler.
+        # Re-triggering them here causes a redundant coordinator block and
+        # incorrect queued_at overwrite.
         response = supabase.table("jobs")\
             .select("*")\
             .eq("status", "pending")\
             .neq("job_type", "workflow")\
+            .is_("blocked_by_job_id", "null")\
             .execute()
 
         if not response.data:
             print(f"[API_KEY_INSERT] No pending image/video jobs found")
             return []
 
+        _api_key_keywords = ['no api key', 'api key', 'authentication', 'unauthorized', 'invalid key', 'no key']
+
+        # Jobs with no error message are included only if they were created recently
+        # (within 30 min).  Old no-error pending jobs are likely stuck for unrelated
+        # reasons and should not be re-triggered on every key insertion event.
+        from datetime import timedelta
+        recent_cutoff = (datetime.utcnow() - timedelta(minutes=30)).isoformat()
+
         matching_jobs = []
         for job in response.data:
+            error_msg = (job.get("error_message") or "").lower()
+            if error_msg:
+                if not any(k in error_msg for k in _api_key_keywords):
+                    continue  # has a non-key error — skip
+            else:
+                # No error message yet — only include if the job is recent
+                if (job.get("created_at") or "") < recent_cutoff:
+                    continue
+
             metadata = job.get("metadata", {}) or {}
             job_provider_key = metadata.get("provider_key") or job.get("provider_key")
 
@@ -1902,10 +2234,13 @@ def fetch_pending_retry_workflow_jobs_for_provider(provider_key: str) -> list:
 
         print(f"[API_KEY_INSERT] Querying pending_retry workflow jobs for provider: {provider_key}")
 
+        # Exclude coordinator-blocked workflow jobs — they are exclusively handled
+        # by coordinator.process_next_queued_job() when their blocker finishes.
         jobs_response = supabase.table("jobs")\
             .select("*")\
             .eq("status", "pending_retry")\
             .eq("job_type", "workflow")\
+            .is_("blocked_by_job_id", "null")\
             .execute()
 
         jobs = jobs_response.data if jobs_response.data else []
@@ -1952,6 +2287,57 @@ def fetch_pending_retry_workflow_jobs_for_provider(provider_key: str) -> list:
 
     except Exception as e:
         print(f"[API_KEY_INSERT] Error querying pending_retry workflow jobs: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
+
+
+def fetch_pending_workflow_jobs_for_provider(provider_key: str) -> list:
+    """
+    Query status=pending workflow jobs that have a key-error message and whose
+    model maps to provider_key.  These are missed by:
+      - fetch_pending_jobs_for_provider()  (explicitly excludes workflow jobs)
+      - fetch_pending_retry_workflow_jobs_for_provider()  (requires pending_retry status)
+      - retry_stale_pending_workflows()  (explicitly skips key-error jobs)
+    They will only start when a matching key is inserted, which is what this
+    function enables.
+    """
+    try:
+        from supabase_client import supabase as _sb
+
+        print(f"[API_KEY_INSERT] Querying pending workflow jobs (key-error) for provider: {provider_key}")
+
+        # Exclude coordinator-blocked jobs — they must only be triggered by
+        # coordinator.process_next_queued_job() when their blocker finishes.
+        # Re-triggering them here causes execute_workflow() → on_job_start() to
+        # re-block them, overwriting queued_at and corrupting FIFO ordering.
+        response = _sb.table("jobs")\
+            .select("*")\
+            .eq("status", "pending")\
+            .eq("job_type", "workflow")\
+            .is_("blocked_by_job_id", "null")\
+            .execute()
+
+        jobs = response.data if response.data else []
+
+        _key_markers = ('no api key', 'invalid key', 'api key rotation failed',
+                        'authentication', 'unauthorized')
+
+        matching = []
+        for job in jobs:
+            error_msg = (job.get("error_message") or "").lower()
+            if not any(k in error_msg for k in _key_markers):
+                continue
+            model = job.get("model", "")
+            if (map_model_to_provider(model, "image") == provider_key or
+                    map_model_to_provider(model, "video") == provider_key):
+                matching.append(job)
+
+        print(f"[API_KEY_INSERT] Found {len(matching)} pending workflow job(s) with key-error for {provider_key}")
+        return matching
+
+    except Exception as e:
+        print(f"[API_KEY_INSERT] Error querying pending workflow jobs: {e}")
         import traceback
         traceback.print_exc()
         return []
@@ -2025,8 +2411,9 @@ def handle_api_key_insertion(payload):
 
         pending_jobs = fetch_pending_jobs_for_provider(provider_key)
         workflow_jobs = fetch_pending_retry_workflow_jobs_for_provider(provider_key)
+        pending_workflow_jobs = fetch_pending_workflow_jobs_for_provider(provider_key)
 
-        total = len(pending_jobs) + len(workflow_jobs)
+        total = len(pending_jobs) + len(workflow_jobs) + len(pending_workflow_jobs)
 
         if total == 0:
             print(f"[API_KEY_INSERT] No jobs to reprocess for {provider_key}")
@@ -2045,10 +2432,6 @@ def handle_api_key_insertion(payload):
 
                 print(f"[{idx}/{len(pending_jobs)}] Reprocessing {job_type} job {job_id}")
                 print(f"   Prompt: {prompt}...")
-
-                if not validate_job_inputs(job):
-                    print(f"   ❌ Job {job_id} missing required inputs — marked as failed, skipping\n")
-                    continue
 
                 try:
                     requests.post(
@@ -2085,7 +2468,7 @@ def handle_api_key_insertion(payload):
                 execution = job.get("_execution", {})
                 execution_id = execution.get("id")
                 error_info = execution.get("error_info", {}) or {}
-                failing_step = error_info.get("step_index", "?")
+                failing_step = error_info.get("failed_step_index", error_info.get("step_index", "?"))
 
                 print(f"[{idx}/{len(workflow_jobs)}] Resuming workflow job {job_id} "
                       f"(failing step: {failing_step}, provider: {provider_key})")
@@ -2110,17 +2493,64 @@ def handle_api_key_insertion(payload):
                         finally:
                             loop.close()
 
-                    wf_thread = threading.Thread(target=resume_workflow, daemon=True)
-                    wf_thread.start()
+                    from workflow_retry_manager import _spawn_workflow_thread
+                    _spawn_workflow_thread(resume_workflow, name=f"KeyInsertResumeWF-{job_id}")
 
                     print(f"   ✅ Workflow job {job_id} submitted for resume\n")
                 except Exception as e:
                     print(f"   ❌ Workflow job {job_id} resume failed: {e}\n")
                     continue
 
+        # --- Workflow jobs (status=pending) with key errors ---
+        if pending_workflow_jobs:
+            print(f"\n{'='*70}")
+            print(f"REPROCESSING {len(pending_workflow_jobs)} PENDING WORKFLOW JOB(S) "
+                  f"WITH KEY-ERROR FOR {provider_key}")
+            print(f"{'='*70}\n")
+
+            for idx, job in enumerate(pending_workflow_jobs, 1):
+                job_id = job.get("job_id") or job.get("id")
+                workflow_id = job.get("model")
+                user_id = job.get("user_id")
+                meta = job.get("metadata", {}) or {}
+                image_url = job.get("image_url") or meta.get("input_image_url")
+
+                print(f"[{idx}/{len(pending_workflow_jobs)}] Re-triggering pending workflow {job_id}")
+
+                if not validate_job_inputs(job):
+                    print(f"   ❌ Workflow job {job_id} missing required inputs — marked as failed, skipping\n")
+                    continue
+
+                try:
+                    def _start_fresh_wf(wf_id=workflow_id, img=image_url, uid=user_id, jid=job_id):
+                        import asyncio as _asyncio
+                        from workflow_manager import get_workflow_manager
+                        loop = _asyncio.new_event_loop()
+                        _asyncio.set_event_loop(loop)
+                        try:
+                            wm = get_workflow_manager()
+                            loop.run_until_complete(wm.execute_workflow(
+                                workflow_id=wf_id,
+                                input_data=img,
+                                user_id=uid,
+                                job_id=jid
+                            ))
+                        except Exception as _e:
+                            print(f"   [WORKFLOW] Fresh re-trigger failed for {jid}: {_e}")
+                        finally:
+                            loop.close()
+
+                    from workflow_retry_manager import _spawn_workflow_thread
+                    _spawn_workflow_thread(_start_fresh_wf, name=f"KeyInsertFreshWF-{job_id}")
+                    print(f"   ✅ Pending workflow job {job_id} submitted for fresh execution\n")
+                except Exception as e:
+                    print(f"   ❌ Pending workflow job {job_id} re-trigger failed: {e}\n")
+                    continue
+
         print(f"{'='*70}")
         print(f"REPROCESSING COMPLETED FOR {provider_key} "
-              f"({len(pending_jobs)} image/video, {len(workflow_jobs)} workflow)")
+              f"({len(pending_jobs)} image/video, {len(workflow_jobs)} pending_retry workflow, "
+              f"{len(pending_workflow_jobs)} pending workflow)")
         print(f"{'='*70}\n")
         
     except Exception as e:
@@ -2183,14 +2613,43 @@ async def api_key_realtime_listener():
         traceback.print_exc()
 
 
+async def _run_with_reconnect(listener_fn, name: str):
+    """
+    Run an async listener function with automatic exponential-backoff reconnection.
+    If the listener crashes (network drop, Supabase maintenance, etc.) it is
+    restarted after a short delay so that realtime events are never permanently
+    missed for the lifetime of the worker process.
+    """
+    delay = 5
+    max_delay = 60
+    while True:
+        _started_at = asyncio.get_event_loop().time()
+        try:
+            await listener_fn()
+            print(f"[RECONNECT] {name} exited cleanly, restarting in {delay}s...")
+        except Exception as e:
+            print(f"[RECONNECT] {name} crashed: {e} — restarting in {delay}s...")
+            notify_error(
+                ErrorType.REALTIME_LISTENER_CRASHED,
+                f"{name} crashed and will reconnect",
+                context={"error": str(e)[:200], "retry_delay": delay}
+            )
+        _ran_for = asyncio.get_event_loop().time() - _started_at
+        if _ran_for >= max_delay:
+            delay = 5
+        else:
+            delay = min(delay * 2, max_delay)
+        await asyncio.sleep(delay)
+
+
 def run_async_listener():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
     async def run_both_listeners():
         await asyncio.gather(
-            realtime_listener(),
-            api_key_realtime_listener()
+            _run_with_reconnect(realtime_listener, "RealtimeJobListener"),
+            _run_with_reconnect(api_key_realtime_listener, "ApiKeyRealtimeListener")
         )
     
     loop.run_until_complete(run_both_listeners())
@@ -2287,7 +2746,7 @@ def start_realtime():
                 sys.stdout.flush()
                 last_heartbeat = time.time()
             
-            # Retry pending jobs with transient errors every 5 minutes
+            # Retry pending jobs with transient errors every 10 minutes
             if time.time() - last_retry_check >= RETRY_INTERVAL:
                 print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Running periodic retry check...")
                 retry_transient_errors()

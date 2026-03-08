@@ -273,7 +273,7 @@ Open `.env` in project root and update:
 
 ```env
 # Backend API URL (stays the same)
-VITE_API_URL=https://api.rasenai.qzz.io
+VITE_API_URL=https://api.ashel.space
 
 # ============================================================
 # NEW SUPABASE ACCOUNT (Frontend - Primary)

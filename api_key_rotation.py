@@ -391,7 +391,13 @@ def handle_api_key_rotation(
     if should_rotate_key(error_message, provider_key):
         print(f"[ROTATION] Deleting failed API key {current_api_key_id}...")
         
-        deleted = delete_api_key(current_api_key_id, error_message)
+        enriched_error = (
+            f"[Job: {job_id}] "
+            f"[Provider: {provider_key}] "
+            f"[Error Type: {error_type}] "
+            f"{error_message}"
+        )
+        deleted = delete_api_key(current_api_key_id, enriched_error)
         
         if not deleted:
             print(f"[ERROR] Failed to delete API key {current_api_key_id}")

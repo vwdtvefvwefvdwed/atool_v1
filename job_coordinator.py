@@ -11,8 +11,10 @@ from provider_api_keys import get_worker1_client
 
 logger = logging.getLogger(__name__)
 
-# Global lock for thread-safe operations
-_coordinator_lock = threading.Lock()
+# Global re-entrant lock for thread-safe coordinator operations
+# RLock allows the same thread to acquire it multiple times (needed since
+# on_job_start holds the lock and calls set_active_job which also acquires it)
+_coordinator_lock = threading.RLock()
 
 # In-memory cache of current state (synced with database)
 _active_job_cache = {
@@ -301,7 +303,20 @@ class JobCoordinator:
         active_job_id = active_state.get('active_job_id')
         active_job_type = active_state.get('active_job_type')
         active_models = active_state.get('active_models', [])
-        
+
+        # Self-reservation check: process_next_queued_job() pre-claims the coordinator
+        # slot BEFORE spawning the processing thread.  When the thread eventually calls
+        # on_job_start() it must not block itself — allow it through so it can proceed
+        # normally and call on_job_complete() when done.
+        if active_job_id == job_id:
+            logger.info(f"[COORDINATOR] Job {job_id} is already the reserved/active job — allowing through")
+            return {
+                "can_start": True,
+                "reason": "Job already reserved as active by coordinator",
+                "blocked_by": None,
+                "conflict_models": []
+            }
+
         # SERIALIZE ALL JOBS: Only one job can run at a time
         # This prevents global state overwrite issues and ensures safety
         logger.warning(f"[COORDINATOR] Job {job_id} blocked: Another job is running ({active_job_id})")
@@ -379,6 +394,8 @@ class JobCoordinator:
         """
         Called when a job wants to start.
         Checks if it can start and updates state accordingly.
+        The entire read-check-write is wrapped in _coordinator_lock to prevent
+        two concurrent calls both seeing "no active job" and both starting.
         
         Args:
             job_id: Job ID
@@ -393,52 +410,58 @@ class JobCoordinator:
         """
         logger.info(f"[COORDINATOR] Job start request: {job_id} ({job_type}) - Models: {required_models}")
         
-        # Check if job can start
-        check_result = self.can_start_job(job_id, job_type, required_models)
-        
-        if check_result['can_start']:
-            # Mark as active
-            if self.set_active_job(job_id, job_type, required_models):
-                # Clear any previous queue info
-                self.clear_job_queue_info(job_id)
-                
-                # Log event
-                self.log_queue_event(job_id, job_type, 'started', models=required_models)
-                
-                return {
-                    "allowed": True,
-                    "reason": check_result['reason'],
-                    "action": "start"
-                }
+        with _coordinator_lock:
+            check_result = self.can_start_job(job_id, job_type, required_models)
+
+            if check_result['can_start']:
+                # Self-reservation: the slot was already claimed by process_next_queued_job().
+                # Skip the redundant set_active_job / clear_job_queue_info / log_queue_event
+                # calls — they were already executed during pre-claim.  Re-running them would
+                # produce a duplicate 'started' entry in job_queue_log and unnecessary DB writes.
+                if check_result.get('reason') == "Job already reserved as active by coordinator":
+                    return {
+                        "allowed": True,
+                        "reason": check_result['reason'],
+                        "action": "start"
+                    }
+
+                if self.set_active_job(job_id, job_type, required_models):
+                    self.clear_job_queue_info(job_id)
+                    self.log_queue_event(job_id, job_type, 'started', models=required_models)
+                    return {
+                        "allowed": True,
+                        "reason": check_result['reason'],
+                        "action": "start"
+                    }
+                else:
+                    # DB write failed — fall back to allowing the job so it is not silently
+                    # dropped.  Without this, the job stays pending forever because the
+                    # calling code returns None and no retry is scheduled.
+                    logger.error(f"[COORDINATOR] set_active_job failed for {job_id} — allowing job through without state tracking")
+                    return {
+                        "allowed": True,
+                        "reason": "DB state update failed — allowing without coordinator tracking",
+                        "action": "start_untracked"
+                    }
             else:
+                self.mark_job_queued(
+                    job_id,
+                    check_result['blocked_by'],
+                    check_result['reason'],
+                    required_models
+                )
+                self.log_queue_event(
+                    job_id, job_type, 'blocked',
+                    models=required_models,
+                    blocked_by_job_id=check_result['blocked_by'],
+                    conflict_reason=check_result['reason']
+                )
                 return {
                     "allowed": False,
-                    "reason": "Failed to update global state",
-                    "action": "error"
+                    "reason": check_result['reason'],
+                    "action": "queue",
+                    "blocked_by": check_result['blocked_by']
                 }
-        else:
-            # Job is blocked - mark as queued
-            self.mark_job_queued(
-                job_id,
-                check_result['blocked_by'],
-                check_result['reason'],
-                required_models
-            )
-            
-            # Log event
-            self.log_queue_event(
-                job_id, job_type, 'blocked',
-                models=required_models,
-                blocked_by_job_id=check_result['blocked_by'],
-                conflict_reason=check_result['reason']
-            )
-            
-            return {
-                "allowed": False,
-                "reason": check_result['reason'],
-                "action": "queue",
-                "blocked_by": check_result['blocked_by']
-            }
     
     def on_job_complete(self, job_id: str, job_type: str) -> bool:
         """
@@ -454,16 +477,20 @@ class JobCoordinator:
         """
         logger.info(f"[COORDINATOR] Job complete: {job_id} ({job_type})")
         
-        # Log completion event
+        # Log completion event (outside lock — non-critical audit trail)
         self.log_queue_event(job_id, job_type, 'completed')
         
-        # Clear active job state
-        if not self.clear_active_job():
-            logger.error(f"[COORDINATOR] Failed to clear active job state for {job_id}")
-            return False
-        
-        # Process next queued job
-        self.process_next_queued_job()
+        # Hold the coordinator lock across BOTH clear and find-next so that a
+        # concurrent realtime INSERT cannot sneak in between the two steps and
+        # see an empty active-job slot before the queued job is promoted.
+        # _coordinator_lock is an RLock so the re-entrant acquisitions inside
+        # clear_active_job() and on_job_start() (called by process_next_queued_job)
+        # work without deadlock.
+        with _coordinator_lock:
+            if not self.clear_active_job():
+                logger.error(f"[COORDINATOR] Failed to clear active job state for {job_id}")
+                return False
+            self.process_next_queued_job()
         
         return True
     
@@ -478,9 +505,11 @@ class JobCoordinator:
             return None
         
         try:
-            # Get all pending jobs with queue info (blocked jobs)
+            # Get all blocked jobs — includes both 'pending' (blocked before execution started)
+            # and 'pending_retry' (blocked during a resume attempt after a retryable failure).
+            # Using 'pending' alone caused pending_retry re-blocked jobs to be permanently stuck.
             response = self.supabase.table('jobs').select('*')\
-                .eq('status', 'pending')\
+                .in_('status', ['pending', 'pending_retry'])\
                 .not_.is_('blocked_by_job_id', 'null')\
                 .order('queued_at', desc=False)\
                 .limit(50)\
@@ -501,24 +530,26 @@ class JobCoordinator:
                 required_models = job.get('required_models', [])
                 
                 # If no models stored, extract from job
-                if not required_models:
-                    if job_type == 'workflow':
-                        # Need to get workflow config - skip for now
-                        logger.warning(f"[COORDINATOR] Workflow {job_id} has no required_models stored")
-                        continue
-                    else:
-                        required_models = [self.get_job_model(job)]
+                if not required_models and job_type != 'workflow':
+                    required_models = [self.get_job_model(job)]
                 
-                # Check if this job can start now
-                check = self.can_start_job(job_id, job_type, required_models)
-                
-                if check['can_start']:
-                    logger.info(f"[COORDINATOR] Starting next queued job: {job_id}")
-                    
-                    # Trigger job processing
+                # Pre-claim the coordinator slot BEFORE spawning the processing thread.
+                # This closes the race window where a new incoming job (arriving via
+                # Supabase Realtime between _trigger_job_processing() returning and the
+                # spawned thread calling on_job_start()) could see an empty active slot
+                # and start concurrently.  The spawned thread's own on_job_start() call
+                # will hit the self-reservation check in can_start_job() and be allowed
+                # through without re-claiming or re-logging.
+                start_result = self.on_job_start(job_id, job_type, required_models)
+
+                if start_result['allowed']:
+                    logger.info(f"[COORDINATOR] Slot pre-claimed for next queued job: {job_id}")
                     self._trigger_job_processing(job)
-                    
                     return job
+                
+                # on_job_start returned not-allowed — this shouldn't happen since we just
+                # cleared the active slot, but guard against it anyway.
+                logger.warning(f"[COORDINATOR] Unexpected block for queued job {job_id}: {start_result['reason']}")
             
             logger.info("[COORDINATOR] No queued jobs can start yet (all still have conflicts)")
             return None
@@ -529,28 +560,93 @@ class JobCoordinator:
     
     def _trigger_job_processing(self, job: Dict):
         """
-        Trigger job processing (call job worker).
-        This is a placeholder - actual implementation depends on your job processing system.
+        Trigger job processing for the next queued job.
+        Routes workflow jobs to the workflow retry/resume system.
+        Routes image/video jobs to the normal job worker.
         
         Args:
             job: Job dict to process
         """
         job_id = job.get('job_id')
-        logger.info(f"[COORDINATOR] Triggering processing for job {job_id}")
-        
-        # Import here to avoid circular dependency
+        job_type = job.get('job_type', 'image')
+        logger.info(f"[COORDINATOR] Triggering processing for job {job_id} (type: {job_type})")
+
+        if job_type == 'workflow':
+            try:
+                import asyncio
+                import threading as _threading
+                from workflow_retry_manager import get_retry_manager
+
+                retry_manager = get_retry_manager()
+                execution_id = None
+
+                try:
+                    from supabase_client import supabase as _sb
+                    exec_resp = _sb.table('workflow_executions') \
+                        .select('id') \
+                        .eq('job_id', job_id) \
+                        .single() \
+                        .execute()
+                    if exec_resp.data:
+                        execution_id = exec_resp.data['id']
+                except Exception as lookup_err:
+                    logger.warning(f"[COORDINATOR] Could not fetch execution for workflow {job_id}: {lookup_err}")
+
+                if execution_id:
+                    def _resume():
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        try:
+                            loop.run_until_complete(retry_manager._resume_workflow(execution_id, job_id))
+                        finally:
+                            loop.close()
+                    _threading.Thread(target=_resume, daemon=True).start()
+                else:
+                    # No execution record: this workflow was blocked by the coordinator BEFORE
+                    # base_workflow.execute() had a chance to create it. Re-trigger it as a
+                    # brand-new execution (not a resume).
+                    logger.info(f"[COORDINATOR] No execution record for workflow {job_id} - re-triggering as fresh execution")
+                    def _execute_fresh(jid=job_id):
+                        from workflow_manager import get_workflow_manager
+                        from supabase_client import supabase as _sb
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        try:
+                            job_row = _sb.table('jobs').select('*').eq('job_id', jid).single().execute()
+                            if not job_row.data:
+                                logger.error(f"[COORDINATOR] Cannot re-trigger {jid}: job row not found")
+                                return
+                            job_data = job_row.data
+                            meta = job_data.get('metadata', {}) or {}
+                            img = job_data.get('image_url') or meta.get('input_image_url')
+                            wm = get_workflow_manager()
+                            loop.run_until_complete(wm.execute_workflow(
+                                workflow_id=job_data.get('model'),
+                                input_data=img,
+                                user_id=job_data.get('user_id'),
+                                job_id=jid
+                            ))
+                        except Exception as _e:
+                            logger.error(f"[COORDINATOR] Fresh workflow execution failed for {jid}: {_e}")
+                        finally:
+                            loop.close()
+                    _threading.Thread(target=_execute_fresh, daemon=True).start()
+
+            except Exception as e:
+                logger.error(f"[COORDINATOR] Error triggering workflow job {job_id}: {e}")
+            return
+
         try:
             from job_worker_realtime import process_job_with_concurrency_control
             import threading
-            
-            # Start job in new thread
+
             job_thread = threading.Thread(
                 target=process_job_with_concurrency_control,
                 args=(job,),
                 daemon=True
             )
             job_thread.start()
-            
+
         except Exception as e:
             logger.error(f"[COORDINATOR] Error triggering job processing: {e}")
 

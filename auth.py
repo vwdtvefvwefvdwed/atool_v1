@@ -6,142 +6,120 @@ Handles magic link authentication, JWT tokens, and user sessions
 import os
 import uuid
 import jwt
-import resend
 from datetime import datetime, timedelta
 from dotenv_vault import load_dotenv
 from supabase_client import supabase
 from supabase_failover import execute_with_failover, get_failover_manager, is_supabase_maintenance_window, is_maintenance_error
-from resend_manager import resend_manager
+import brevo_manager
+import mailtrap_manager
+import resend_manager
+import loops_manager
 
 load_dotenv()
 
 # Configuration
 JWT_SECRET = os.getenv("JWT_SECRET")
-EMAIL_FROM = os.getenv("EMAIL_FROM", "noreply@yourdomain.com")
-EMAIL_FROM_BACKUP = os.getenv("EMAIL_FROM_BACKUP", EMAIL_FROM)
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 
 
 def send_magic_link(email: str) -> dict:
     """
-    Generate a magic link token and send it via email
-    
-    Args:
-        email: User's email address
-        
-    Returns:
-        dict with success status and message
+    Generate a magic link token and send it via email.
+
+    Flow:
+        1. Try Brevo    (primary)    → success or fallback
+        2. Try Mailtrap (secondary)  → success or fallback
+        3. Try Resend   (tertiary)   → success or fallback
+        4. Try Loops    (last resort) → success or hard fail
     """
-    try:
-        # Block new signups during Supabase maintenance window
-        if is_supabase_maintenance_window():
-            print(f"[MAINTENANCE] Blocking new signup during maintenance window")
-            return {
-                "success": False,
-                "error": "Server under maintenance. Please try again after 03:00 UTC (Jan 16, 2026).",
-                "maintenance": True
-            }
-        
-        # Generate unique token
-        token = str(uuid.uuid4())
-        expires_at = datetime.utcnow() + timedelta(minutes=15)
-        
-        # Store token in database (with failover detection)
-        execute_with_failover(
-            lambda: supabase.table("magic_links").insert({
-                "token": token,
-                "email": email,
-                "expires_at": expires_at.isoformat(),
-                "used": False
-            }).execute()
-        )
-        
-        # Create magic link URL
-        magic_link = f"{FRONTEND_URL}/auth/verify?token={token}"
-        
-        # Send email via Resend with improved deliverability
-        email_params = {
-            "from": f"Ashel-Free AI Studio <{EMAIL_FROM}>",
-            "to": [email],
-            "subject": "Sign in to Ashel-Free AI Studio",
-            "headers": {
-                "X-Entity-Ref-ID": token[:8],  # Unique reference for tracking
-            },
-            "html": f"""
-            <!DOCTYPE html>
-            <html lang="en">
-            <head>
-                <meta charset="UTF-8">
-                <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                <title>Sign in to Ashel-Free AI Studio</title>
-            </head>
-            <body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f5f5f5;">
-                <table role="presentation" style="width: 100%; border-collapse: collapse;">
+    if is_supabase_maintenance_window():
+        print("[MAINTENANCE] Blocking new signup during maintenance window")
+        return {
+            "success": False,
+            "error": "Server under maintenance. Please try again later.",
+            "maintenance": True,
+        }
+
+    token = str(uuid.uuid4())
+    expires_at = datetime.utcnow() + timedelta(minutes=15)
+
+    execute_with_failover(
+        lambda: supabase.table("magic_links").insert({
+            "token": token,
+            "email": email,
+            "expires_at": expires_at.isoformat(),
+            "used": False,
+        }).execute()
+    )
+
+    magic_link = f"{FRONTEND_URL}/auth/verify?token={token}"
+    subject = "Sign in to Ashel-Free AI Studio"
+
+    html_content = f"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sign in to Ashel-Free AI Studio</title>
+</head>
+<body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f5f5f5;">
+    <table role="presentation" style="width: 100%; border-collapse: collapse;">
+        <tr>
+            <td align="center" style="padding: 40px 0;">
+                <table role="presentation" style="width: 600px; max-width: 100%; border-collapse: collapse; background-color: white; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
                     <tr>
-                        <td align="center" style="padding: 40px 0;">
-                            <table role="presentation" style="width: 600px; max-width: 100%; border-collapse: collapse; background-color: white; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
-                                <!-- Header -->
+                        <td style="padding: 40px 30px 30px; text-align: center; border-bottom: 1px solid #eee;">
+                            <h1 style="margin: 0; color: #333; font-size: 24px; font-weight: 600;">🎨 Ashel-Free AI Studio</h1>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 30px;">
+                            <h2 style="color: #333; margin: 0 0 20px; font-size: 20px; font-weight: 600;">Sign in to your account</h2>
+                            <p style="color: #666; font-size: 16px; line-height: 1.6; margin: 0 0 20px;">
+                                Click the button below to securely sign in to your Ashel-Free AI Studio account. This link will expire in 15 minutes for your security.
+                            </p>
+                            <table role="presentation" style="margin: 30px 0;">
                                 <tr>
-                                    <td style="padding: 40px 30px 30px; text-align: center; border-bottom: 1px solid #eee;">
-                                        <h1 style="margin: 0; color: #333; font-size: 24px; font-weight: 600;">🎨 Ashel-Free AI Studio</h1>
-                                    </td>
-                                </tr>
-                                
-                                <!-- Content -->
-                                <tr>
-                                    <td style="padding: 30px;">
-                                        <h2 style="color: #333; margin: 0 0 20px; font-size: 20px; font-weight: 600;">Sign in to your account</h2>
-                                        <p style="color: #666; font-size: 16px; line-height: 1.6; margin: 0 0 20px;">
-                                            Click the button below to securely sign in to your Ashel-Free AI Studio account. This link will expire in 15 minutes for your security.
-                                        </p>
-                                        
-                                        <!-- CTA Button -->
-                                        <table role="presentation" style="margin: 30px 0;">
-                                            <tr>
-                                                <td align="center">
-                                                    <a href="{magic_link}" 
-                                                       style="background-color: #9333ea; background: linear-gradient(135deg, #a855f7 0%, #6366f1 100%); color: #ffffff; padding: 14px 28px; text-decoration: none; border-radius: 6px; font-weight: 600; display: inline-block; font-size: 16px;">
-                                                        Sign In Now →
-                                                    </a>
-                                                </td>
-                                            </tr>
-                                        </table>
-                                        
-                                        <p style="color: #999; font-size: 14px; line-height: 1.5; margin: 20px 0 0;">
-                                            If you didn't request this sign-in link, you can safely ignore this email. No changes will be made to your account.
-                                        </p>
-                                    </td>
-                                </tr>
-                                
-                                <!-- Alternative Link -->
-                                <tr>
-                                    <td style="padding: 0 30px 30px; border-top: 1px solid #eee;">
-                                        <p style="color: #999; font-size: 12px; line-height: 1.5; margin: 20px 0 0;">
-                                            <strong>Having trouble with the button?</strong><br>
-                                            Copy and paste this link into your browser:<br>
-                                            <a href="{magic_link}" style="color: #a855f7; word-break: break-all;">{magic_link}</a>
-                                        </p>
-                                    </td>
-                                </tr>
-                                
-                                <!-- Footer -->
-                                <tr>
-                                    <td style="padding: 20px 30px; background-color: #f9f9f9; border-top: 1px solid #eee; border-radius: 0 0 10px 10px;">
-                                        <p style="color: #999; font-size: 12px; line-height: 1.5; margin: 0; text-align: center;">
-                                            This is an automated message from Ashel-Free AI Studio.<br>
-                                            © 2024 Ashel-Free AI Studio. All rights reserved.
-                                        </p>
+                                    <td align="center">
+                                        <a href="{magic_link}"
+                                           style="background-color: #9333ea; background: linear-gradient(135deg, #a855f7 0%, #6366f1 100%); color: #ffffff; padding: 14px 28px; text-decoration: none; border-radius: 6px; font-weight: 600; display: inline-block; font-size: 16px;">
+                                            Sign In Now →
+                                        </a>
                                     </td>
                                 </tr>
                             </table>
+                            <p style="color: #999; font-size: 14px; line-height: 1.5; margin: 20px 0 0;">
+                                If you didn't request this sign-in link, you can safely ignore this email. No changes will be made to your account.
+                            </p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 0 30px 30px; border-top: 1px solid #eee;">
+                            <p style="color: #999; font-size: 12px; line-height: 1.5; margin: 20px 0 0;">
+                                <strong>Having trouble with the button?</strong><br>
+                                Copy and paste this link into your browser:<br>
+                                <a href="{magic_link}" style="color: #a855f7; word-break: break-all;">{magic_link}</a>
+                            </p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 20px 30px; background-color: #f9f9f9; border-top: 1px solid #eee; border-radius: 0 0 10px 10px;">
+                            <p style="color: #999; font-size: 12px; line-height: 1.5; margin: 0; text-align: center;">
+                                This is an automated message from Ashel-Free AI Studio.<br>
+                                © 2024 Ashel-Free AI Studio. All rights reserved.
+                            </p>
                         </td>
                     </tr>
                 </table>
-            </body>
-            </html>
-            """,
-            "text": f"""
-Sign in to Ashel-Free AI Studio
+            </td>
+        </tr>
+    </table>
+</body>
+</html>
+"""
+
+    text_content = f"""Sign in to Ashel-Free AI Studio
 
 Click the link below to securely sign in to your account:
 {magic_link}
@@ -153,54 +131,68 @@ If you didn't request this sign-in link, you can safely ignore this email.
 ---
 Ashel-Free AI Studio
 © 2024 All rights reserved.
-            """
-        }
-        
-        resend.Emails.send(email_params)
-        
-        print(f"[OK] Magic link sent to: {email}")
+"""
+
+    try:
+        brevo_manager.send_email(email, subject, html_content, text_content)
+        print(f"[OK] Magic link sent via Brevo to: {email}")
         return {
             "success": True,
             "message": "Magic link sent! Check your email.",
-            "email": email
+            "email": email,
         }
-        
-    except Exception as e:
-        print(f"[ERROR] Error sending magic link: {e}")
-        
-        # Check if this is a Resend quota exceeded error
-        if resend_manager.handle_resend_error(e):
-            print("[RESEND] Retrying with backup API key...")
-            try:
-                email_params["from"] = f"Ashel-Free AI Studio <{EMAIL_FROM_BACKUP}>"
-                resend.Emails.send(email_params)
-                print(f"[OK] Magic link sent via backup account: {email}")
-                return {
-                    "success": True,
-                    "message": "Magic link sent! Check your email.",
-                    "email": email
-                }
-            except Exception as retry_error:
-                print(f"[ERROR] Backup also failed: {retry_error}")
-                return {
-                    "success": False,
-                    "error": "Email service temporarily unavailable. Both accounts exhausted.",
-                    "message": "Failed to send magic link"
-                }
-        
-        # Check if this is a maintenance error
-        if is_maintenance_error(e):
+    except Exception as brevo_error:
+        print(f"[BREVO] Failed: {brevo_error} — falling back to Mailtrap")
+        brevo_manager.notify_brevo_fallback(brevo_error, email)
+
+    try:
+        mailtrap_manager.send_email(email, subject, html_content, text_content)
+        print(f"[OK] Magic link sent via Mailtrap to: {email}")
+        return {
+            "success": True,
+            "message": "Magic link sent! Check your email.",
+            "email": email,
+        }
+    except Exception as mailtrap_error:
+        print(f"[MAILTRAP] Failed: {mailtrap_error} — falling back to Resend")
+        mailtrap_manager.notify_mailtrap_fallback(mailtrap_error, email)
+
+    try:
+        resend_manager.send_email(email, subject, html_content, text_content)
+        print(f"[OK] Magic link sent via Resend to: {email}")
+        return {
+            "success": True,
+            "message": "Magic link sent! Check your email.",
+            "email": email,
+        }
+    except Exception as resend_error:
+        print(f"[RESEND] Failed: {resend_error} — falling back to Loops")
+        resend_manager.notify_resend_failed(resend_error, email)
+
+    try:
+        loops_manager.send_email(email, magic_link)
+        print(f"[OK] Magic link sent via Loops to: {email}")
+        return {
+            "success": True,
+            "message": "Magic link sent! Check your email.",
+            "email": email,
+        }
+    except Exception as loops_error:
+        print(f"[LOOPS] Failed: {loops_error} — all providers exhausted")
+        loops_manager.notify_loops_failed(loops_error, email)
+
+        if is_maintenance_error(loops_error):
             return {
                 "success": False,
                 "error": "Server under maintenance. Email service temporarily unavailable.",
                 "maintenance": True,
-                "message": "Failed to send magic link due to maintenance"
+                "message": "Failed to send magic link due to maintenance",
             }
-        
+
         return {
             "success": False,
-            "error": str(e),
-            "message": "Failed to send magic link"
+            "error": "Email service temporarily unavailable. Please try again later.",
+            "message": "Failed to send magic link",
         }
 
 

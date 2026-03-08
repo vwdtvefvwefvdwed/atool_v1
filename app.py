@@ -91,8 +91,8 @@ start_retry_manager()
 load_dotenv()
 
 # Get environment URLs for CORS
-BACKEND_URL = os.getenv("BACKEND_URL", "https://api.rasenai.qzz.io")
-FRONTEND_URL = os.getenv("FRONTEND_URL", "https://rasenai.qzz.io")
+BACKEND_URL = os.getenv("BACKEND_URL", "https://api.ashel.space")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "https://ashel.space")
 
 # Configure CORS to allow requests from frontend
 # This fixes the "No 'Access-Control-Allow-Origin' header" error
@@ -102,9 +102,9 @@ allowed_origins = [
     "http://localhost:5173",
     "http://127.0.0.1:3000",
     "http://127.0.0.1:5173",
-    "https://rasenai.qzz.io",
-    "https://api.rasenai.qzz.io",
-    "https://api.rasenai.qzz.io:8080",
+    "https://ashel.space",
+    "https://api.ashel.space",
+    "https://api.ashel.space:8080",
     "https://free.wispbyte.com",
     "https://atool.pages.dev",
     FRONTEND_URL,
@@ -1376,12 +1376,31 @@ def worker_get_next_job():
 
 @app.route("/worker/pending-jobs", methods=["GET"])
 def worker_get_pending_jobs():
-    """Get ALL pending jobs for backlog catch-up"""
+    """Get ALL pending jobs for backlog catch-up, ordered by priority then age.
+    Priority is stored as an integer in metadata->>'priority' (1=highest, 3=lowest).
+    Workflow jobs carry the same priority value — this ensures a P1 workflow is
+    processed before a P3 image job, not just after all image jobs."""
     try:
         print(f"📥 Worker requesting all pending jobs...")
 
-        # Query for all pending jobs from database
-        response = supabase.table("jobs").select("*").eq("status", "pending").order("created_at", desc=False).execute()
+        # Order by priority level (1 before 2 before 3, NULLs last) then by age.
+        # metadata->>'priority' is a JSONB text extraction; single-digit values sort
+        # correctly as text ('1' < '2' < '3').
+        #
+        # Exclude coordinator-blocked jobs (blocked_by_job_id IS NOT NULL).
+        # On startup the coordinator slot is empty.  Re-submitting blocked jobs causes
+        # coordinator.on_job_start() to re-block them, which overwrites their queued_at
+        # timestamp and destroys FIFO ordering.  Blocked jobs are exclusively handled
+        # by coordinator.process_next_queued_job() once their blocker completes.
+        response = (
+            supabase.table("jobs")
+            .select("*")
+            .eq("status", "pending")
+            .is_("blocked_by_job_id", "null")
+            .order("metadata->>priority", desc=False, nullsfirst=False)
+            .order("created_at", desc=False)
+            .execute()
+        )
 
         if response.data:
             jobs = response.data
@@ -1609,6 +1628,20 @@ def worker_reset_job(job_id):
                 print(f"Updated job {job_id} metadata with provider_key: {provider_key}")
     except Exception as e:
         print(f"Error updating job metadata: {e}")
+
+    # If the coordinator still shows this job as active (e.g. job crashed mid-run),
+    # clear the stale lock AND process the next queued job so coordinator-blocked
+    # jobs are not permanently stuck waiting.
+    try:
+        from job_coordinator import get_job_coordinator
+        coordinator = get_job_coordinator()
+        state = coordinator.get_active_job_state()
+        if state and state.get('active_job_id') == job_id:
+            coordinator.clear_active_job()
+            coordinator.process_next_queued_job()
+            print(f"[COORDINATOR] Cleared stale active-job lock for reset job {job_id} and triggered next queued job")
+    except Exception as coord_err:
+        print(f"⚠️ Could not clear coordinator state for reset job {job_id}: {coord_err}")
 
     success = update_job_status(
         job_id,
@@ -2532,7 +2565,37 @@ def execute_workflow():
 
         current_user = get_current_user()
         user_id = current_user['user_id']
-        
+
+        # Verify slider CAPTCHA token (same as normal job endpoint)
+        captcha_token = request.form.get("captcha_token")
+        captcha_result = verify_captcha_token(captcha_token)
+        if not captcha_result["success"]:
+            error_msg = captcha_result.get("error", "CAPTCHA verification failed")
+            print(f"❌ Workflow CAPTCHA verification failed: {error_msg}")
+            return jsonify({
+                "success": False,
+                "error": "Please complete the CAPTCHA verification"
+            }), 400
+        print(f"✅ Workflow CAPTCHA verified successfully")
+
+        # Check for active jobs for this user (user-specific, all job types)
+        try:
+            active_jobs_response = supabase.table("jobs").select("job_id, status, job_type, model").eq(
+                "user_id", user_id
+            ).in_(
+                "status", ["pending", "running", "pending_retry"]
+            ).limit(1).execute()
+
+            if active_jobs_response.data and len(active_jobs_response.data) > 0:
+                active_job = active_jobs_response.data[0]
+                print(f"⚠️ User {user_id} has active job: {active_job['job_id']} (status={active_job['status']}, type={active_job.get('job_type')})")
+                return jsonify({
+                    "success": False,
+                    "error": "Run one job at a time"
+                }), 400
+        except Exception as e:
+            print(f"⚠️ Error checking active jobs for workflow: {e}")
+
         print(f"📋 Workflow execution request - Form data: {dict(request.form)}")
         print(f"📋 Files: {list(request.files.keys())}")
         

@@ -563,10 +563,15 @@ ALTER TABLE priority2_queue ENABLE ROW LEVEL SECURITY;
 ALTER TABLE priority3_queue ENABLE ROW LEVEL SECURITY;
 ALTER TABLE ad_sessions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE flagged_ips ENABLE ROW LEVEL SECURITY;
+ALTER TABLE modal_deployments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE modal_endpoints ENABLE ROW LEVEL SECURITY;
+ALTER TABLE sync_metadata ENABLE ROW LEVEL SECURITY;
+ALTER TABLE workflow_executions ENABLE ROW LEVEL SECURITY;
 
--- Drop existing policies if they exist
+-- Drop existing policies if they exist (idempotent)
 DROP POLICY IF EXISTS "Users can view own data" ON users;
 DROP POLICY IF EXISTS "Users can update own data" ON users;
+DROP POLICY IF EXISTS "Service role full access to users" ON users;
 DROP POLICY IF EXISTS "Users can read own valid magic links" ON magic_links;
 DROP POLICY IF EXISTS "Anonymous can validate magic links" ON magic_links;
 DROP POLICY IF EXISTS "Service role has full access to magic links" ON magic_links;
@@ -574,17 +579,30 @@ DROP POLICY IF EXISTS "Users can view own jobs" ON jobs;
 DROP POLICY IF EXISTS "Users can create own jobs" ON jobs;
 DROP POLICY IF EXISTS "Users can update own jobs" ON jobs;
 DROP POLICY IF EXISTS "Users can delete own jobs" ON jobs;
+DROP POLICY IF EXISTS "Service role full access to jobs" ON jobs;
 DROP POLICY IF EXISTS "Users can view own sessions" ON sessions;
+DROP POLICY IF EXISTS "Service role full access to sessions" ON sessions;
 DROP POLICY IF EXISTS "Users can view own usage logs" ON usage_logs;
+DROP POLICY IF EXISTS "Service role full access to usage logs" ON usage_logs;
 DROP POLICY IF EXISTS "Users can view own priority1 entries" ON priority1_queue;
+DROP POLICY IF EXISTS "Service role full access to priority1" ON priority1_queue;
 DROP POLICY IF EXISTS "Users can view own priority2 entries" ON priority2_queue;
+DROP POLICY IF EXISTS "Service role full access to priority2" ON priority2_queue;
 DROP POLICY IF EXISTS "Users can view own priority3 entries" ON priority3_queue;
+DROP POLICY IF EXISTS "Service role full access to priority3" ON priority3_queue;
 DROP POLICY IF EXISTS "Users can view own ad sessions" ON ad_sessions;
 DROP POLICY IF EXISTS "Service role can manage all ad sessions" ON ad_sessions;
+DROP POLICY IF EXISTS "Service role can manage flagged IPs" ON flagged_ips;
+DROP POLICY IF EXISTS "Service role full access to modal deployments" ON modal_deployments;
+DROP POLICY IF EXISTS "Service role full access to modal endpoints" ON modal_endpoints;
+DROP POLICY IF EXISTS "Service role full access to sync metadata" ON sync_metadata;
+DROP POLICY IF EXISTS "Users can view own workflow executions" ON workflow_executions;
+DROP POLICY IF EXISTS "Service role full access to workflow executions" ON workflow_executions;
 
 -- Users policies
 CREATE POLICY "Users can view own data" ON users FOR SELECT USING (id = (SELECT auth.uid()));
 CREATE POLICY "Users can update own data" ON users FOR UPDATE USING (id = (SELECT auth.uid()));
+CREATE POLICY "Service role full access to users" ON users FOR ALL TO service_role USING (true) WITH CHECK (true);
 
 -- Magic links policies
 CREATE POLICY "Users can read own valid magic links" ON magic_links
@@ -612,24 +630,43 @@ CREATE POLICY "Users can view own jobs" ON jobs FOR SELECT USING (user_id = (SEL
 CREATE POLICY "Users can create own jobs" ON jobs FOR INSERT WITH CHECK (user_id = (SELECT auth.uid()));
 CREATE POLICY "Users can update own jobs" ON jobs FOR UPDATE USING (user_id = (SELECT auth.uid()));
 CREATE POLICY "Users can delete own jobs" ON jobs FOR DELETE USING (user_id = (SELECT auth.uid()));
+CREATE POLICY "Service role full access to jobs" ON jobs FOR ALL TO service_role USING (true) WITH CHECK (true);
 
 -- Sessions policies
 CREATE POLICY "Users can view own sessions" ON sessions FOR SELECT USING (user_id = (SELECT auth.uid()));
+CREATE POLICY "Service role full access to sessions" ON sessions FOR ALL TO service_role USING (true) WITH CHECK (true);
 
 -- Usage logs policies
 CREATE POLICY "Users can view own usage logs" ON usage_logs FOR SELECT USING (user_id = (SELECT auth.uid()));
+CREATE POLICY "Service role full access to usage logs" ON usage_logs FOR ALL TO service_role USING (true) WITH CHECK (true);
 
 -- Priority queue policies
 CREATE POLICY "Users can view own priority1 entries" ON priority1_queue FOR SELECT USING (user_id = (SELECT auth.uid()));
+CREATE POLICY "Service role full access to priority1" ON priority1_queue FOR ALL TO service_role USING (true) WITH CHECK (true);
 CREATE POLICY "Users can view own priority2 entries" ON priority2_queue FOR SELECT USING (user_id = (SELECT auth.uid()));
+CREATE POLICY "Service role full access to priority2" ON priority2_queue FOR ALL TO service_role USING (true) WITH CHECK (true);
 CREATE POLICY "Users can view own priority3 entries" ON priority3_queue FOR SELECT USING (user_id = (SELECT auth.uid()));
+CREATE POLICY "Service role full access to priority3" ON priority3_queue FOR ALL TO service_role USING (true) WITH CHECK (true);
 
 -- Ad sessions policies
 CREATE POLICY "Users can view own ad sessions" ON ad_sessions FOR SELECT USING (user_id = (SELECT auth.uid()));
-CREATE POLICY "Service role can manage all ad sessions" ON ad_sessions FOR ALL USING (true);
+CREATE POLICY "Service role can manage all ad sessions" ON ad_sessions FOR ALL TO service_role USING (true) WITH CHECK (true);
 
--- Flagged IPs policies (only service role can view/manage)
-CREATE POLICY "Service role can manage flagged IPs" ON flagged_ips FOR ALL USING (true);
+-- Flagged IPs policies (service role only)
+CREATE POLICY "Service role can manage flagged IPs" ON flagged_ips FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+-- Modal deployments policies (service role only — backend managed)
+CREATE POLICY "Service role full access to modal deployments" ON modal_deployments FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+-- Modal endpoints policies (service role only — backend managed)
+CREATE POLICY "Service role full access to modal endpoints" ON modal_endpoints FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+-- Sync metadata policies (service role only — backend managed)
+CREATE POLICY "Service role full access to sync metadata" ON sync_metadata FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+-- Workflow executions policies
+CREATE POLICY "Users can view own workflow executions" ON workflow_executions FOR SELECT USING (user_id = (SELECT auth.uid()));
+CREATE POLICY "Service role full access to workflow executions" ON workflow_executions FOR ALL TO service_role USING (true) WITH CHECK (true);
 
 -- =====================================================
 -- FUNCTIONS
@@ -1132,31 +1169,47 @@ CREATE POLICY "Users can delete own shared results" ON shared_results
 -- =====================================================
 
 -- Grant usage on schema
-GRANT USAGE ON SCHEMA public TO anon, authenticated;
+GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role;
 
 -- Grant permissions on tables
 GRANT SELECT, INSERT, UPDATE, DELETE ON users TO authenticated;
+GRANT ALL ON users TO service_role;
 GRANT SELECT, INSERT ON magic_links TO anon, authenticated;
+GRANT ALL ON magic_links TO service_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON jobs TO authenticated;
+GRANT ALL ON jobs TO service_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON sessions TO authenticated;
+GRANT ALL ON sessions TO service_role;
 GRANT SELECT, INSERT ON usage_logs TO authenticated;
+GRANT ALL ON usage_logs TO service_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON priority1_queue TO authenticated;
+GRANT ALL ON priority1_queue TO service_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON priority2_queue TO authenticated;
+GRANT ALL ON priority2_queue TO service_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON priority3_queue TO authenticated;
+GRANT ALL ON priority3_queue TO service_role;
 GRANT ALL ON ad_sessions TO service_role;
 GRANT SELECT, INSERT, UPDATE ON ad_sessions TO authenticated;
 GRANT SELECT ON shared_results TO anon, authenticated;
 GRANT INSERT, UPDATE, DELETE ON shared_results TO authenticated;
+GRANT ALL ON shared_results TO service_role;
+GRANT ALL ON flagged_ips TO service_role;
+GRANT ALL ON modal_deployments TO service_role;
+GRANT ALL ON modal_endpoints TO service_role;
+GRANT ALL ON sync_metadata TO service_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON workflow_executions TO authenticated;
+GRANT ALL ON workflow_executions TO service_role;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO service_role;
 
 -- Grant execute on functions
-GRANT EXECUTE ON FUNCTION cleanup_expired_magic_links() TO authenticated;
-GRANT EXECUTE ON FUNCTION cleanup_expired_sessions() TO authenticated;
-GRANT EXECUTE ON FUNCTION update_user_last_login(UUID) TO authenticated;
-GRANT EXECUTE ON FUNCTION get_user_stats(UUID) TO authenticated;
-GRANT EXECUTE ON FUNCTION generate_share_id() TO authenticated;
-GRANT EXECUTE ON FUNCTION increment_share_view(TEXT) TO anon, authenticated;
-GRANT EXECUTE ON FUNCTION increment_share_click(TEXT) TO anon, authenticated;
-GRANT EXECUTE ON FUNCTION increment_share_conversion(TEXT) TO authenticated;
+GRANT EXECUTE ON FUNCTION cleanup_expired_magic_links() TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION cleanup_expired_sessions() TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION update_user_last_login(UUID) TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION get_user_stats(UUID) TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION generate_share_id() TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION increment_share_view(TEXT) TO anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION increment_share_click(TEXT) TO anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION increment_share_conversion(TEXT) TO authenticated, service_role;
 
 -- Grant realtime permissions
 GRANT SELECT ON jobs TO anon;

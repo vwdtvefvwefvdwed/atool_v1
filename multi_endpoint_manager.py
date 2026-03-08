@@ -2972,7 +2972,7 @@ class EndpointManager:
     Used by workflow engine for model routing
     """
     
-    async def generate_image(self, prompt, model, provider_key, aspect_ratio='1:1', input_image_url=None, **kwargs):
+    async def generate_image(self, prompt, model, provider_key, aspect_ratio='1:1', input_image_url=None, job_id=None, **kwargs):
         """
         Generate image with specified model and provider
         Includes automatic API key rotation on provider errors
@@ -3042,7 +3042,7 @@ class EndpointManager:
                         api_key_id,
                         provider_key,
                         error_message,
-                        job_id=f"workflow-{model}"
+                        job_id=job_id or f"workflow-{model}"
                     )
                     
                     if rotation_success and next_key:
@@ -3057,7 +3057,7 @@ class EndpointManager:
         
         raise Exception(f"Generation failed after {max_rotation_attempts} rotation attempts")
     
-    async def generate_video(self, prompt, model, provider_key, input_image_url=None, duration=5, **kwargs):
+    async def generate_video(self, prompt, model, provider_key, input_image_url=None, duration=5, job_id=None, **kwargs):
         """
         Generate video with specified model and provider
         Includes automatic API key rotation on provider errors
@@ -3131,7 +3131,7 @@ class EndpointManager:
                         api_key_id,
                         provider_key,
                         error_message,
-                        job_id=f"workflow-{model}"
+                        job_id=job_id or f"workflow-{model}"
                     )
                     
                     if rotation_success and next_key:
