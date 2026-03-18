@@ -9,7 +9,7 @@
   "enabled": true,
   "avatar_image_url": "https://res.cloudinary.com/dnagl4r2t/image/upload/v1771751129/avatar002_xvbg7s.png",
   "default_prompts": {
-    "image_edit": "Use Image B reference as the absolute base with full composition, camera, pose, scale, and proportion lock, and perform a high-fidelity face swap only on the background male warrior using Image A as the identity reference; keep the swapped face clearly recognizable to Image A reference with accurate eye shape, facial structure, bone proportions, and skin detail, while strictly preserving the original head size, head position, and head-to-body ratio from Image B so the face size remains constant and perfectly aligned with the body; lock the original braided hairstyle from Image B with identical length, thickness, placement, hairline, and silhouette with no volume or style changes; match the exact facial expression, gaze direction, tension, and battle-ready emotion of the warrior in Image B; after the swap, fully convert the new face to Na'vi style with blue skin tone precisely color-sampled from the neck and torso, matching hue, saturation, luminance, texture, and bioluminescent pore glow, and apply the same red Ash Clan war paint pattern, opacity, and wear so it blends seamlessly across the face–neck boundary with identical scene lighting and shadow behavior; strictly do not modify the foreground woman, creature, warrior pose, ears, hair, costume, environment, depth, or camera perspective, and maintain ultra-detailed photorealistic cinematic quality throughout.",
+    "image_edit": "Use Image B as an immutable base (no deviation) with full composition, camera, pose, anatomy, scale, and framing lock; perform only a precise face swap on the background male warrior using Image A as identity reference; output must be identical to Image B except facial identity (no new subjects, no scene changes); match Image A facial structure, eyes, and proportions while keeping original head size, position, and alignment exactly unchanged (no scaling or shift); preserve Image B braided hair exactly; match the same expression, gaze, and intensity; convert face to Na'vi using exact neck/torso color sampling with identical blue tone, subsurface glow, and bioluminescence; apply identical red Ash Clan war paint with seamless face–neck blending under same lighting; strictly forbid any change to foreground woman, creature, pose, costume, environment, depth, lighting, or camera; no reinterpretation, no additions, photorealistic cinematic output only.",
     "upscale": "Ultra high-resolution photorealistic avatar dragon rider with fused facial likeness, sharp focus, cinematic quality, 8K, HDR"
   },
   "supported_models": {
@@ -17,7 +17,7 @@
       "nano-banana-pro-leonardo"
     ],
     "upscale": [
-      "stability-upscale-fast"
+      "clipdrop-upscale"
     ]
   },
   "steps": [
@@ -41,10 +41,10 @@
       "id": 2,
       "name": "upscale",
       "type": "generation",
-      "description": "Fast 4x upscale with Stability AI (2 credits)",
+      "description": "Fast upscale with Clipdrop (2 credits)",
       "model_type": "image",
-      "default_model": "stability-upscale-fast",
-      "provider": "vision-stabilityai"
+      "default_model": "clipdrop-upscale",
+      "provider": "vision-clipdrop"
     }
   ],
   "estimated_duration_seconds": 60,

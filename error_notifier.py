@@ -67,6 +67,7 @@ class ErrorType(Enum):
     LOOPS_RATE_LIMITED = ("api_keys", "envelope,pause_button,warning")
     LOOPS_SERVER_ERROR = ("critical", "fire,envelope,skull")
     LOOPS_SEND_FAILED = ("critical", "fire,envelope,x")
+    LOOPS_CYCLING_TO_BREVO = ("api_keys", "envelope,arrows_counterclockwise,repeat")
     
     REPLICATE_API_ERROR = ("providers", "link,x")
     FAL_AI_ERROR = ("providers", "link,warning")

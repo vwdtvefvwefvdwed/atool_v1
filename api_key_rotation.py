@@ -25,11 +25,16 @@ PROVIDER_KEY_MAPPING = {
     "vision-deapi": "deapi",
     "vision-leonardo": "leonardo",
     "vision-stabilityai": "stabilityai",
+    "vision-picsart": "picsart",
+    "vision-clipdrop": "clipdrop",
+    "vision-frenix": "frenix",
     # cinematic-* video providers (from multi_endpoint_manager.py)
     "cinematic-nova": "replicate",
     "cinematic-pro": "kie",
     "cinematic-bria": "bria_cinematic",
     "cinematic-leonardo": "leonardo",
+    "cinematic-vercel": "vercel_ai_gateway",
+    "vision-vercel": "vercel_ai_gateway",
     # bare provider names (used by image/video job worker directly)
     "replicate": "replicate",
     "pixazo": "pixazo",
@@ -53,6 +58,11 @@ PROVIDER_KEY_MAPPING = {
     "kling": "kling",
     "luma": "luma",
     "pika": "pika",
+    "vercel_ai_gateway": "vercel_ai_gateway",
+    "vercel": "vercel_ai_gateway",
+    "picsart": "picsart",
+    "clipdrop": "clipdrop",
+    "frenix": "frenix",
 }
 
 _COMMON_LIMIT_PATTERNS = [
@@ -107,6 +117,8 @@ _COMMON_ENTRY = {
 }
 
 NO_API_KEY_PROVIDERS = {"xeven"}
+
+NO_DELETE_ROTATE_PROVIDERS = {"vision-infip", "vision-a4f", "vision-frenix"}
 
 ERROR_PATTERNS = {
     "replicate": {
@@ -281,6 +293,62 @@ ERROR_PATTERNS = {
             r"no valid api",
         ],
     },
+    "vercel_ai_gateway": {
+        "limit_reached": _COMMON_LIMIT_PATTERNS + [
+            r"429",
+            r"gatewayratelimiterror",
+            r"gateway rate limit",
+            r"gatewayresponseerror",
+            r"invalid error response",
+            r"upstream.*rate",
+            r"rate limit.*free tier",
+            r"free tier.*rate limit",
+        ],
+        "credit_exceeded": _COMMON_CREDIT_PATTERNS + [
+            r"gatewaycreditserror",
+            r"gateway credits",
+            r"credits hit \$0",
+            r"credits.*\$0",
+            r"ai gateway credits",
+            r"add.*payment method",
+            r"payment method",
+            r"not authorized",
+            r"user token",
+            r"ai_gateway_api_key",
+            r"missing.*api key",
+            r"api key.*missing",
+            r"environment variable",
+        ],
+    },
+    "picsart": {
+        "limit_reached": _COMMON_LIMIT_PATTERNS + [
+            r"too many requests",
+            r"request limit",
+        ],
+        "credit_exceeded": _COMMON_CREDIT_PATTERNS + [
+            r"credits exhausted",
+            r"no credits",
+            r"out of credits",
+            r"invalid api key",
+            r"x-picsart-api-key",
+        ],
+    },
+    "clipdrop": {
+        "limit_reached": _COMMON_LIMIT_PATTERNS + [
+            r"too many requests",
+            r"rate limiter",
+            r"space out your requests",
+        ],
+        "credit_exceeded": _COMMON_CREDIT_PATTERNS + [
+            r"no remaining credits",
+            r"no api key provided",
+            r"revocated",
+            r"revoked",
+            r"x-api-key",
+            r"x-remaining-credits",
+        ],
+    },
+    "frenix":         _COMMON_ENTRY,
     "huggingface":    _COMMON_ENTRY,
     "openai":         _COMMON_ENTRY,
     "fal":            _COMMON_ENTRY,
@@ -418,6 +486,47 @@ def handle_api_key_rotation(
     else:
         print(f"[ROTATION] Error type '{error_type}' doesn't require key rotation")
         return False, None
+
+
+def handle_roundrobin_rotation(
+    provider_key: str,
+    error_message: str,
+    job_id: str
+) -> Tuple[bool, Optional[Dict[str, Any]]]:
+    """
+    Rotate to the next API key WITHOUT deleting the current one.
+    Used for providers in NO_DELETE_ROTATE_PROVIDERS.
+
+    Unlike handle_api_key_rotation(), this never deletes a key.
+    It simply advances the round-robin pointer and returns the next key.
+    Cycle counting and failure decisions are handled by the caller (job worker).
+
+    Returns:
+        Tuple of (success, next_api_key_data)
+    """
+    error_type = detect_error_type(error_message, provider_key)
+
+    print(f"\n{'='*70}")
+    print(f"RR-ROTATION (no-delete) TRIGGERED")
+    print(f"{'='*70}")
+    print(f"Job ID: {job_id}")
+    print(f"Provider: {provider_key}")
+    print(f"Error Type: {error_type}")
+    print(f"Error Message: {error_message}")
+    print(f"{'='*70}\n")
+
+    if not should_rotate_key(error_message, provider_key):
+        print(f"[RR-ROTATION] Error type '{error_type}' does not require rotation")
+        return False, None
+
+    next_key = get_next_api_key_for_provider(provider_key)
+
+    if next_key:
+        print(f"[RR-ROTATION] Got next key (key #{next_key.get('key_number', '?')}) - key NOT deleted")
+        return True, next_key
+
+    print(f"[RR-ROTATION] No keys available for provider '{provider_key}'")
+    return False, None
 
 
 def log_rotation_attempt(

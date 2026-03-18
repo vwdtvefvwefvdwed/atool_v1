@@ -88,8 +88,8 @@ class PencilPhysiquePortraitWorkflow(BaseWorkflow):
         logger.info("Starting upscale step with Stability AI")
         endpoint_manager = get_endpoint_manager()
 
-        model = step_config.get('model', step_config.get('default_model', 'stability-upscale-fast'))
-        provider = step_config.get('provider', 'vision-stabilityai')
+        model = step_config.get('model', step_config.get('default_model', 'clipdrop-upscale'))
+        provider = step_config.get('provider', 'vision-clipdrop')
         prompt = self.config['default_prompts']['upscale']
 
         logger.info(f"Using model: {model}, provider: {provider}")

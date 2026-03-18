@@ -133,67 +133,76 @@ Ashel-Free AI Studio
 © 2024 All rights reserved.
 """
 
-    try:
-        brevo_manager.send_email(email, subject, html_content, text_content)
-        print(f"[OK] Magic link sent via Brevo to: {email}")
-        return {
-            "success": True,
-            "message": "Magic link sent! Check your email.",
-            "email": email,
-        }
-    except Exception as brevo_error:
-        print(f"[BREVO] Failed: {brevo_error} — falling back to Mailtrap")
-        brevo_manager.notify_brevo_fallback(brevo_error, email)
+    MAX_EMAIL_CYCLES = 2
 
-    try:
-        mailtrap_manager.send_email(email, subject, html_content, text_content)
-        print(f"[OK] Magic link sent via Mailtrap to: {email}")
-        return {
-            "success": True,
-            "message": "Magic link sent! Check your email.",
-            "email": email,
-        }
-    except Exception as mailtrap_error:
-        print(f"[MAILTRAP] Failed: {mailtrap_error} — falling back to Resend")
-        mailtrap_manager.notify_mailtrap_fallback(mailtrap_error, email)
+    for cycle in range(1, MAX_EMAIL_CYCLES + 1):
+        is_last_cycle = cycle == MAX_EMAIL_CYCLES
 
-    try:
-        resend_manager.send_email(email, subject, html_content, text_content)
-        print(f"[OK] Magic link sent via Resend to: {email}")
-        return {
-            "success": True,
-            "message": "Magic link sent! Check your email.",
-            "email": email,
-        }
-    except Exception as resend_error:
-        print(f"[RESEND] Failed: {resend_error} — falling back to Loops")
-        resend_manager.notify_resend_failed(resend_error, email)
-
-    try:
-        loops_manager.send_email(email, magic_link)
-        print(f"[OK] Magic link sent via Loops to: {email}")
-        return {
-            "success": True,
-            "message": "Magic link sent! Check your email.",
-            "email": email,
-        }
-    except Exception as loops_error:
-        print(f"[LOOPS] Failed: {loops_error} — all providers exhausted")
-        loops_manager.notify_loops_failed(loops_error, email)
-
-        if is_maintenance_error(loops_error):
+        try:
+            brevo_manager.send_email(email, subject, html_content, text_content)
+            print(f"[OK] Magic link sent via Brevo to: {email}")
             return {
-                "success": False,
-                "error": "Server under maintenance. Email service temporarily unavailable.",
-                "maintenance": True,
-                "message": "Failed to send magic link due to maintenance",
+                "success": True,
+                "message": "Magic link sent! Check your email.",
+                "email": email,
             }
+        except Exception as brevo_error:
+            print(f"[BREVO] Failed (cycle {cycle}/{MAX_EMAIL_CYCLES}): {brevo_error} — falling back to Mailtrap")
+            brevo_manager.notify_brevo_fallback(brevo_error, email)
 
-        return {
-            "success": False,
-            "error": "Email service temporarily unavailable. Please try again later.",
-            "message": "Failed to send magic link",
-        }
+        try:
+            mailtrap_manager.send_email(email, subject, html_content, text_content)
+            print(f"[OK] Magic link sent via Mailtrap to: {email}")
+            return {
+                "success": True,
+                "message": "Magic link sent! Check your email.",
+                "email": email,
+            }
+        except Exception as mailtrap_error:
+            print(f"[MAILTRAP] Failed (cycle {cycle}/{MAX_EMAIL_CYCLES}): {mailtrap_error} — falling back to Resend")
+            mailtrap_manager.notify_mailtrap_fallback(mailtrap_error, email)
+
+        try:
+            resend_manager.send_email(email, subject, html_content, text_content)
+            print(f"[OK] Magic link sent via Resend to: {email}")
+            return {
+                "success": True,
+                "message": "Magic link sent! Check your email.",
+                "email": email,
+            }
+        except Exception as resend_error:
+            print(f"[RESEND] Failed (cycle {cycle}/{MAX_EMAIL_CYCLES}): {resend_error} — falling back to Loops")
+            resend_manager.notify_resend_failed(resend_error, email)
+
+        try:
+            loops_manager.send_email(email, magic_link)
+            print(f"[OK] Magic link sent via Loops to: {email}")
+            return {
+                "success": True,
+                "message": "Magic link sent! Check your email.",
+                "email": email,
+            }
+        except Exception as loops_error:
+            if is_last_cycle:
+                print(f"[LOOPS] Failed (cycle {cycle}/{MAX_EMAIL_CYCLES}): {loops_error} — all providers exhausted")
+                loops_manager.notify_loops_failed(loops_error, email)
+
+                if is_maintenance_error(loops_error):
+                    return {
+                        "success": False,
+                        "error": "Server under maintenance. Email service temporarily unavailable.",
+                        "maintenance": True,
+                        "message": "Failed to send magic link due to maintenance",
+                    }
+
+                return {
+                    "success": False,
+                    "error": "Email service temporarily unavailable. Please try again later.",
+                    "message": "Failed to send magic link",
+                }
+            else:
+                print(f"[LOOPS] Failed (cycle {cycle}/{MAX_EMAIL_CYCLES}): {loops_error} — cycling back to Brevo")
+                loops_manager.notify_loops_cycling(loops_error, email, cycle, MAX_EMAIL_CYCLES)
 
 
 def verify_magic_link(token: str, client_ip: str = None) -> dict:

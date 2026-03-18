@@ -3,7 +3,7 @@ Multi-Endpoint Manager
 Routes generation requests to different API providers based on provider key:
 - vision-nova, cinematic-nova → Replicate API
 - vision-pixazo → Pixazo API
-- vision-huggingface → Hugging Face API
+- vision-huggingface → Hugging Face API (Gradio Space: IllusionDiffusion | Gradio Space Upscaler: Real-ESRGAN 4x, Swin2SR 2x via LULDev/upscale)
 - vision-ultrafast → RapidAPI (Ultra Fast Nano Banana)
 - vision-atlas → A4F API (OpenAI-compatible)
 - vision-flux, cinematic-pro → KIE AI (Task-based)
@@ -13,7 +13,11 @@ Routes generation requests to different API providers based on provider key:
 - vision-deapi → deAPI (Async polling-based)
 - vision-leonardo, cinematic-leonardo → Leonardo AI (Async polling-based)
 - vision-stabilityai → Stability AI (Image upscaling)
+- vision-picsart → Picsart API (Ultra upscaling)
+- vision-clipdrop → Clipdrop API (Image upscaling)
 - cinematic-bria → Bria AI Cinematic (Video editing and generation)
+- cinematic-vercel, vision-vercel → Vercel AI Gateway (xAI Grok models)
+- vision-frenix → Frenix API (Image generation)
 """
 
 import os
@@ -117,9 +121,17 @@ PIXAZO_MODELS = {
     'flux-1-schnell': 'flux-1-schnell',
 }
 
-# Hugging Face Models
+# Hugging Face Models (Gradio Space)
 HUGGINGFACE_MODELS = {
     'AP123/IllusionDiffusion': 'AP123/IllusionDiffusion',
+}
+
+# HuggingFace upscaler/restore models via Gradio Spaces
+# Maps model name → (gradio_space_id, scale_value, api_type)
+# api_type: 'real-esrgan' | 'codeformer'
+HUGGINGFACE_SERVERLESS_MODELS = {
+    'finegrain/finegrain-image-enhancer': ('finegrain/finegrain-image-enhancer', '4x', 'finegrain'),
+    'sczhou/CodeFormer':                  ('sczhou/CodeFormer',                  '2',  'codeformer'),
 }
 
 # RapidAPI Models - Ultra Fast Nano Banana
@@ -219,7 +231,7 @@ INFIP_MODELS = {
 # Note: All models require async polling
 DEAPI_MODELS = {
     'z-image-turbo-deapi': 'ZImageTurbo_INT8',  # Fast photorealistic model (INT8 quantized)
-    'flux-schnell-deapi': 'Flux1schnell',  # Fast iteration model (1-10 steps)
+    'flux-schnell-deapi': 'Flux1schnell',  # Fast iteration model (20 steps)
 }
 
 # Leonardo AI Models - https://cloud.leonardo.ai/api/rest/v1 & v2
@@ -244,6 +256,33 @@ LEONARDO_MODELS = {
 # Note: Fast Upscaler costs only 2 credits (vs 40 for Conservative)
 STABILITYAI_MODELS = {
     'stability-upscale-fast': 'fast',  # Fast upscaler (4x resolution in ~1s, 2 credits)
+}
+
+# Picsart Ultra Upscale Models - https://api.picsart.io/tools/1.0
+PICSART_MODELS = {
+    'picsart-ultra-upscale': 'ultra',  # Ultra upscale (async, AI-enhanced)
+    'picsart-upscale': 'normal',       # Normal upscale (sync, fast)
+}
+
+# Clipdrop Image Upscaling Models - https://clipdrop-api.co
+CLIPDROP_MODELS = {
+    'clipdrop-upscale': 'upscale',  # 2x upscale
+}
+
+# Frenix Image Models - https://api.frenix.sh/v1
+FRENIX_IMAGE_MODELS = {
+    'frenix-dirtberry':  'provider-2/dirtberry',
+    'frenix-flux-2-pro': 'provider-2/flux-2-pro',
+}
+
+# Vercel AI Gateway Models - https://ai-gateway.vercel.sh/v1
+# xAI Grok Imagine models via Vercel AI Gateway (separate from KIE-based grok models)
+VERCEL_AI_GATEWAY_MODELS = {
+    # Video models (cinematic-vercel) - xai/grok-imagine-video
+    'grok-text-to-video-2': 'xai/grok-imagine-video',    # text-to-video (numbered to differ from KIE grok)
+    'grok-image-to-video-2': 'xai/grok-imagine-video',   # image-to-video (numbered to differ from KIE grok)
+    # Image models (vision-vercel) - xai/grok-imagine-image (normal, not pro)
+    'grok-imagine-image': 'xai/grok-imagine-image',       # image generation
 }
 
 ENDPOINT_IMAGE_INPUT_SUPPORT = {
@@ -315,6 +354,22 @@ ENDPOINT_IMAGE_INPUT_SUPPORT = {
         'requires_image': True,
         'notes': 'stability-upscale-fast REQUIRES input image. Upscales to 4x resolution.',
     },
+    'vercel_ai_gateway': {
+        'supported': True,
+        'notes': 'Image: grok-imagine-image is text-to-image only. Video: grok-image-to-video-2 REQUIRES image input. grok-text-to-video-2 is text-to-video only.',
+        'models_requiring_image': ['grok-image-to-video-2'],
+        'models_not_supporting_image': ['grok-text-to-video-2', 'grok-imagine-image'],
+    },
+    'picsart': {
+        'supported': True,
+        'requires_image': True,
+        'notes': 'picsart-ultra-upscale REQUIRES input image. Upscales up to 8x resolution.',
+    },
+    'clipdrop': {
+        'supported': True,
+        'requires_image': True,
+        'notes': 'clipdrop-upscale REQUIRES input image. Doubles resolution.',
+    },
 }
 
 
@@ -336,6 +391,11 @@ PROVIDER_ROUTING = {
     'cinematic-pro': 'kie',
     'cinematic-bria': 'bria_cinematic',
     'cinematic-leonardo': 'leonardo',
+    'cinematic-vercel': 'vercel_ai_gateway',
+    'vision-vercel': 'vercel_ai_gateway',
+    'vision-picsart': 'picsart',
+    'vision-clipdrop': 'clipdrop',
+    'vision-frenix': 'frenix',
 }
 
 
@@ -358,6 +418,11 @@ PROVIDER_ALLOWED_IMAGE_FORMATS = {
     'cinematic-pro':        ['jpg', 'jpeg', 'png', 'webp'],
     'cinematic-bria':       ['mp4', 'webm', 'mov'],
     'cinematic-leonardo':   ['jpg', 'jpeg', 'png', 'webp', 'gif'],
+    'cinematic-vercel':     ['jpg', 'jpeg', 'png', 'webp'],
+    'vision-vercel':        [],
+    'vision-picsart':       ['jpg', 'jpeg', 'png', 'webp'],
+    'vision-clipdrop':      ['jpg', 'jpeg', 'png', 'webp'],
+    'vision-frenix':        [],
 }
 
 
@@ -416,6 +481,8 @@ def get_endpoint_type(provider_key, model_name=None):
             return 'pixazo'
         if model_name in HUGGINGFACE_MODELS:
             return 'huggingface'
+        if model_name in HUGGINGFACE_SERVERLESS_MODELS:
+            return 'huggingface'
         if model_name in RAPIDAPI_MODELS:
             return 'rapidapi'
         if model_name in A4F_MODELS:
@@ -438,6 +505,14 @@ def get_endpoint_type(provider_key, model_name=None):
             return 'leonardo'
         if model_name in STABILITYAI_MODELS:
             return 'stabilityai'
+        if model_name in VERCEL_AI_GATEWAY_MODELS:
+            return 'vercel_ai_gateway'
+        if model_name in PICSART_MODELS:
+            return 'picsart'
+        if model_name in CLIPDROP_MODELS:
+            return 'clipdrop'
+        if model_name in FRENIX_IMAGE_MODELS:
+            return 'frenix'
     return 'replicate'
 
 
@@ -697,11 +772,179 @@ def generate_with_pixazo(prompt, model, aspect_ratio, api_key, input_image_url=N
         raise Exception(f"Pixazo generation failed: {str(e)}")
 
 
+def _pillow_upscale_fallback(image_bytes, scale_str):
+    """
+    Local Pillow LANCZOS upscale — always works, no external dependency.
+    Used when all HF Gradio spaces fail.
+    """
+    import io
+    from PIL import Image
+    scale = int(scale_str.replace('x', ''))
+    img = Image.open(io.BytesIO(image_bytes)).convert('RGB')
+    new_size = (img.width * scale, img.height * scale)
+    upscaled = img.resize(new_size, Image.LANCZOS)
+    out = io.BytesIO()
+    upscaled.save(out, format='JPEG', quality=92)
+    return out.getvalue()
+
+
+def _read_hf_result(result):
+    """Extract image bytes from a Gradio predict result (path, url, or dict)."""
+    import os
+    output_path = result[0] if isinstance(result, (tuple, list)) else result
+    if isinstance(output_path, dict):
+        output_path = output_path.get('path') or output_path.get('url') or output_path.get('name')
+
+    if isinstance(output_path, str) and os.path.exists(output_path):
+        with open(output_path, 'rb') as f:
+            return f.read()
+    elif isinstance(output_path, str) and output_path.startswith('http'):
+        dl = requests.get(output_path, timeout=60)
+        if dl.status_code != 200:
+            raise Exception(f"Failed to download result: {dl.status_code}")
+        return dl.content
+    else:
+        raise Exception(f"Unexpected result format: {type(output_path)} → {output_path}")
+
+
+def _try_hf_space_predict(space_id, scale, temp_path, api_type='real-esrgan', timeout=90):
+    """
+    Try one HF Gradio Space. Returns raw image bytes or raises.
+    Enforces a hard timeout via concurrent.futures so a hanging Space doesn't block forever.
+    api_type: 'real-esrgan' → predict(image, scale_str)
+              'codeformer'  → predict(image, fidelity, upscale)
+              'finegrain'   → predict(image, prompt, neg_prompt, steps, guidance, strength, seed)
+    """
+    import concurrent.futures
+    from gradio_client import Client, handle_file
+
+    def _call_real_esrgan():
+        client = Client(space_id, verbose=False)
+        try:
+            return client.predict(
+                handle_file(temp_path),
+                scale,
+                api_name="/predict"
+            )
+        except Exception:
+            return client.predict(
+                handle_file(temp_path),
+                scale,
+            )
+
+    def _call_codeformer():
+        client = Client(space_id, verbose=False)
+        upscale_int = int(str(scale).replace('x', '')) if str(scale).replace('x', '').isdigit() else 2
+        return client.predict(
+            handle_file(temp_path),  # image
+            0.5,                     # codeformer_fidelity (0=high restoration, 1=original look)
+            upscale_int,             # upscale factor
+        )
+
+    def _call_finegrain():
+        client = Client(space_id, verbose=False)
+        result = client.predict(
+            handle_file(temp_path),                            # image
+            "masterpiece, best quality, highres",              # prompt
+            "worst quality, low quality, normal quality",      # negative_prompt
+            20,    # num_inference_steps
+            6,     # guidance_scale
+            0.6,   # controlnet_conditioning_scale
+            0,     # seed
+        )
+        # result[0] = input preview (tiny), result[1] = enhanced output (full size)
+        return result[1] if isinstance(result, (list, tuple)) and len(result) > 1 else result
+
+    if api_type == 'codeformer':
+        fn = _call_codeformer
+    elif api_type == 'finegrain':
+        fn = _call_finegrain
+    else:
+        fn = _call_real_esrgan
+
+    print(f"[HuggingFace Upscale] Connecting to Space: {space_id} (type={api_type}, timeout={timeout}s)")
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(fn)
+        try:
+            result = future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            raise Exception(f"Space {space_id} timed out after {timeout}s")
+
+    print(f"[HuggingFace Upscale] Raw result type: {type(result)}, value: {str(result)[:300]}")
+    return _read_hf_result(result)
+
+
+def generate_with_hf_serverless(model, api_key, input_image_url):
+    """
+    Upscale/restore an image via HuggingFace Gradio Spaces.
+    Falls back to Pillow LANCZOS if the Space fails (always returns a result).
+
+    Models:
+      finegrain/finegrain-image-enhancer → 4x upscale (Finegrain Image Enhancer)
+      sczhou/CodeFormer   → 2x upscale + face restoration
+    """
+    import os
+    import tempfile
+
+    space_info = HUGGINGFACE_SERVERLESS_MODELS.get(model)
+    if not space_info:
+        raise Exception(f"Unknown upscale model: {model}")
+    space_id, scale, api_type = space_info
+
+    if not input_image_url:
+        raise Exception(f"Upscale model '{model}' requires an input image")
+
+    print(f"[HuggingFace Upscale] Model: {model}, space={space_id}, scale={scale}")
+    print(f"[HuggingFace Upscale] Downloading input image: {input_image_url}")
+
+    img_response = requests.get(input_image_url, timeout=30)
+    if img_response.status_code != 200:
+        raise Exception(f"Failed to download input image: {img_response.status_code}")
+
+    image_bytes = img_response.content
+
+    ext = input_image_url.split('?')[0].rsplit('.', 1)[-1].lower()
+    if ext not in ('jpg', 'jpeg', 'png', 'webp'):
+        ext = 'jpg'
+
+    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=f'.{ext}')
+    temp_file.write(image_bytes)
+    temp_file.close()
+    temp_path = temp_file.name
+
+    image_data = None
+    try:
+        try:
+            print(f"[HuggingFace Upscale] Trying space: {space_id}")
+            image_data = _try_hf_space_predict(space_id, scale, temp_path, api_type=api_type)
+            print(f"[HuggingFace Upscale] Success via {space_id} ({len(image_data)} bytes)")
+        except Exception as e:
+            print(f"[HuggingFace Upscale] Space {space_id} failed: {str(e)[:150]}")
+    finally:
+        try:
+            os.unlink(temp_path)
+        except Exception:
+            pass
+
+    if image_data is None:
+        print(f"[HuggingFace Upscale] Space failed — using Pillow LANCZOS fallback")
+        image_data = _pillow_upscale_fallback(image_bytes, scale)
+        print(f"[HuggingFace Upscale] Pillow fallback done ({len(image_data)} bytes)")
+
+    b64_data = base64.b64encode(image_data).decode('utf-8')
+    return {"success": True, "data": b64_data, "type": "image", "is_base64": True}
+
+
 def generate_with_huggingface(prompt, model, aspect_ratio, api_key, input_image_url=None, job_type="image", duration=5):
     """
-    Generate images using Hugging Face Gradio Space
-    Uses gradio_client for AP123/IllusionDiffusion
+    Generate images using Hugging Face.
+    - Gradio Space for upscale/restore models (finegrain/finegrain-image-enhancer, sczhou/CodeFormer)
+    - Gradio Space (gradio_client) for AP123/IllusionDiffusion
     """
+    if model in HUGGINGFACE_SERVERLESS_MODELS:
+        return generate_with_hf_serverless(model, api_key, input_image_url)
+
     from gradio_client import Client
     
     hf_model = HUGGINGFACE_MODELS.get(model, model)
@@ -1255,8 +1498,8 @@ def generate_with_deapi(prompt, model, aspect_ratio, api_key, input_image_url=No
     https://api.deapi.ai/api/v1/client/txt2img
     
     Supports 2 models (all require async polling):
-    - ZImageTurbo_INT8: Fast photorealistic model (4 steps, ultra-fast)
-    - Flux1schnell: Fast iteration model (10 steps, high quality)
+    - ZImageTurbo_INT8: Fast photorealistic model (20 steps)
+    - Flux1schnell: Fast iteration model (20 steps)
     
     Workflow:
     1. POST /api/v1/client/txt2img → returns request_id
@@ -1296,10 +1539,10 @@ def generate_with_deapi(prompt, model, aspect_ratio, api_key, input_image_url=No
     # Model-specific settings
     if deapi_model == "ZImageTurbo_INT8":
         guidance = 3.5
-        steps = 4
+        steps = 20
     elif deapi_model == "Flux1schnell":
         guidance = 7.5
-        steps = 10
+        steps = 20
     else:
         guidance = 7.5
         steps = 20
@@ -2811,6 +3054,417 @@ def generate_with_stabilityai(prompt, model, aspect_ratio, api_key, input_image_
         raise Exception(f"Stability AI generation failed: {str(e)}")
 
 
+def _picsart_normal_upscale(api_key, input_image_url):
+    """
+    Picsart Normal Upscale (sync).
+    POST https://api.picsart.io/tools/1.0/upscale
+    Returns 200 with data.url immediately.
+    """
+    endpoint = "https://api.picsart.io/tools/1.0/upscale"
+    headers = {
+        "X-Picsart-API-Key": api_key,
+        "Accept": "application/json",
+    }
+
+    print(f"[Picsart] Downloading input image: {input_image_url}")
+    img_response = requests.get(input_image_url, timeout=60)
+    if img_response.status_code != 200:
+        raise Exception(f"Failed to download input image: {img_response.status_code}")
+
+    image_data = img_response.content
+    image_size_mb = len(image_data) / (1024 * 1024)
+    print(f"[Picsart] Image size: {image_size_mb:.2f} MB")
+
+    ext = input_image_url.split('?')[0].rsplit('.', 1)[-1].lower()
+    mime = 'image/jpeg' if ext in ('jpg', 'jpeg') else f'image/{ext}'
+
+    files = {'image': (f'image.{ext}', image_data, mime)}
+    data = {'upscale_factor': 8}
+
+    print(f"[Picsart Normal] Sending upscale request (8x)")
+    response = requests.post(endpoint, headers=headers, files=files, data=data, timeout=120)
+
+    if response.status_code == 402:
+        raise Exception(f"Picsart API error 402: Payment Required - credits exhausted")
+    if response.status_code == 401:
+        raise Exception(f"Picsart API error 401: Unauthorized - invalid API key")
+    if response.status_code != 200:
+        raise Exception(f"Picsart API error {response.status_code}: {response.text}")
+
+    result = response.json()
+    if result.get('status') != 'success':
+        raise Exception(f"Picsart normal upscale failed: {result}")
+
+    url = result.get('data', {}).get('url')
+    if not url:
+        raise Exception(f"Picsart normal upscale response missing image URL: {result}")
+
+    print(f"[Picsart Normal] Upscale successful: {url}")
+    return {"success": True, "url": url, "type": "image"}
+
+
+def generate_with_picsart(prompt, model, aspect_ratio, api_key, input_image_url=None, job_type="image", **kwargs):
+    """
+    Upscale an image using Picsart API.
+    - picsart-upscale:       POST https://api.picsart.io/tools/1.0/upscale (sync, 200 + url)
+    - picsart-ultra-upscale: POST https://api.picsart.io/tools/1.0/upscale/ultra (async 202 + poll)
+    Auth: X-Picsart-API-Key header
+    Credits: Depletes Picsart API credits. 402 = exhausted.
+    """
+    if not input_image_url:
+        raise Exception("Picsart upscale requires an input image")
+
+    validate_image_format(input_image_url, ['jpg', 'jpeg', 'png', 'webp'], '[Picsart]')
+
+    picsart_type = PICSART_MODELS.get(model, 'ultra')
+
+    if picsart_type == 'normal':
+        return _picsart_normal_upscale(api_key, input_image_url)
+
+    endpoint = "https://api.picsart.io/tools/1.0/upscale/ultra"
+    headers = {
+        "X-Picsart-API-Key": api_key,
+        "Accept": "application/json",
+    }
+
+    print(f"[Picsart] Downloading input image: {input_image_url}")
+    img_response = requests.get(input_image_url, timeout=60)
+    if img_response.status_code != 200:
+        raise Exception(f"Failed to download input image: {img_response.status_code}")
+
+    image_data = img_response.content
+    image_size_mb = len(image_data) / (1024 * 1024)
+    print(f"[Picsart] Image size: {image_size_mb:.2f} MB")
+
+    ext = input_image_url.split('?')[0].rsplit('.', 1)[-1].lower()
+    mime = 'image/jpeg' if ext in ('jpg', 'jpeg') else f'image/{ext}'
+
+    files = {'image': (f'image.{ext}', image_data, mime)}
+    data = {'upscale_factor': 8}
+
+    print(f"[Picsart] Sending ultra upscale request (8x)")
+    response = requests.post(endpoint, headers=headers, files=files, data=data, timeout=120)
+
+    if response.status_code == 402:
+        raise Exception(f"Picsart API error 402: Payment Required - credits exhausted")
+    if response.status_code == 401:
+        raise Exception(f"Picsart API error 401: Unauthorized - invalid API key")
+    if response.status_code not in (200, 202):
+        raise Exception(f"Picsart API error {response.status_code}: {response.text}")
+
+    result = response.json()
+
+    if response.status_code == 200 and result.get('status') == 'success':
+        url = result.get('data', {}).get('url')
+        if not url:
+            raise Exception(f"Picsart response missing image URL: {result}")
+        print(f"[Picsart] Upscale successful (sync): {url}")
+        return {"success": True, "url": url, "type": "image"}
+
+    transaction_id = result.get('transaction_id')
+    if not transaction_id:
+        raise Exception(f"Picsart async response missing transaction_id: {result}")
+
+    print(f"[Picsart] Job accepted (202), polling transaction_id: {transaction_id}")
+    poll_url = f"https://api.picsart.io/tools/1.0/upscale/ultra/{transaction_id}"
+    max_polls = 40
+    poll_interval = 5
+
+    for attempt in range(max_polls):
+        time.sleep(poll_interval)
+        poll_resp = requests.get(poll_url, headers=headers, timeout=30)
+
+        if poll_resp.status_code == 402:
+            raise Exception(f"Picsart API error 402: Payment Required - credits exhausted")
+        if poll_resp.status_code == 401:
+            raise Exception(f"Picsart API error 401: Unauthorized - invalid API key")
+        if poll_resp.status_code != 200:
+            raise Exception(f"Picsart poll error {poll_resp.status_code}: {poll_resp.text}")
+
+        poll_result = poll_resp.json()
+        status = poll_result.get('status')
+        print(f"[Picsart] Poll {attempt + 1}/{max_polls}: status={status}")
+
+        if status == 'success':
+            url = poll_result.get('data', {}).get('url')
+            if not url:
+                raise Exception(f"Picsart poll result missing image URL: {poll_result}")
+            print(f"[Picsart] Upscale successful: {url}")
+            return {"success": True, "url": url, "type": "image"}
+
+        if status in ('failed', 'error'):
+            raise Exception(f"Picsart upscale failed: {poll_result}")
+
+    raise Exception(f"Picsart upscale timed out after {max_polls * poll_interval}s")
+
+
+def generate_with_clipdrop(prompt, model, aspect_ratio, api_key, input_image_url=None, job_type="image", **kwargs):
+    """
+    Upscale an image using Clipdrop Image Upscaling API.
+    Endpoint: POST https://clipdrop-api.co/image-upscaling/v1/upscale
+    Auth: x-api-key header
+    Response: binary PNG image
+    Credits: Depletes Clipdrop API credits. 402 = exhausted.
+    """
+    import io
+    from PIL import Image as PILImage
+
+    if not input_image_url:
+        raise Exception("Clipdrop upscale requires an input image")
+
+    validate_image_format(input_image_url, ['jpg', 'jpeg', 'png', 'webp'], '[Clipdrop]')
+
+    endpoint = "https://clipdrop-api.co/image-upscaling/v1/upscale"
+    headers = {"x-api-key": api_key}
+
+    print(f"[Clipdrop] Downloading input image: {input_image_url}")
+    img_response = requests.get(input_image_url, timeout=60)
+    if img_response.status_code != 200:
+        raise Exception(f"Failed to download input image: {img_response.status_code}")
+
+    image_data = img_response.content
+    image_size_mb = len(image_data) / (1024 * 1024)
+    print(f"[Clipdrop] Image size: {image_size_mb:.2f} MB")
+
+    pil_img = PILImage.open(io.BytesIO(image_data))
+    orig_w, orig_h = pil_img.size
+
+    MAX_INPUT_PIXELS = 16_000_000
+    if orig_w * orig_h > MAX_INPUT_PIXELS:
+        import math
+        scale = math.sqrt(MAX_INPUT_PIXELS / (orig_w * orig_h))
+        capped_w = int(orig_w * scale)
+        capped_h = int(orig_h * scale)
+        print(f"[Clipdrop] Input exceeds 16MP ({orig_w}x{orig_h}), downscaling to {capped_w}x{capped_h} before upscale")
+        pil_img = pil_img.resize((capped_w, capped_h), PILImage.LANCZOS)
+        buf = io.BytesIO()
+        pil_img.save(buf, format='JPEG', quality=95)
+        image_data = buf.getvalue()
+        orig_w, orig_h = capped_w, capped_h
+
+    target_w = min(orig_w * 16, 4096)
+    target_h = min(orig_h * 16, 4096)
+    print(f"[Clipdrop] Upscaling {orig_w}x{orig_h} → {target_w}x{target_h}")
+
+    ext = input_image_url.split('?')[0].rsplit('.', 1)[-1].lower()
+    mime = 'image/jpeg' if ext in ('jpg', 'jpeg') else f'image/{ext}'
+
+    files = {'image_file': (f'image.{ext}', image_data, mime)}
+    data = {'target_width': target_w, 'target_height': target_h}
+
+    print(f"[Clipdrop] Sending upscale request")
+    response = requests.post(endpoint, headers=headers, files=files, data=data, timeout=120)
+
+    if response.status_code == 402:
+        raise Exception(f"Clipdrop API error 402: Payment Required - credits exhausted")
+    if response.status_code == 401:
+        raise Exception(f"Clipdrop API error 401: Unauthorized - invalid API key")
+    if response.status_code != 200:
+        raise Exception(f"Clipdrop API error {response.status_code}: {response.text}")
+
+    upscaled_bytes = response.content
+    print(f"[Clipdrop] Upscale successful: {len(upscaled_bytes) / (1024*1024):.2f} MB")
+    return {
+        "success": True,
+        "is_raw_bytes": True,
+        "data": upscaled_bytes,
+        "type": "image"
+    }
+
+
+def generate_with_vercel_ai_gateway(prompt, model, aspect_ratio, api_key, input_image_url=None, job_type="image", duration=5):
+    """
+    Generate image or video using Vercel AI Gateway.
+    Base URL: https://ai-gateway.vercel.sh/v1
+    Auth: Bearer {AI_GATEWAY_API_KEY}
+    Image: POST /v1/images/generations  (OpenAI-compatible)
+    Video: POST /v1/video/generations   (Vercel video API)
+    """
+    vercel_base_url = "https://ai-gateway.vercel.sh/v1"
+    vercel_model = VERCEL_AI_GATEWAY_MODELS.get(model, model)
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    aspect_map = {
+        "1:1": "1:1",
+        "16:9": "16:9",
+        "9:16": "9:16",
+        "4:3": "4:3",
+        "3:4": "3:4",
+        "3:2": "3:2",
+        "2:3": "2:3",
+    }
+    vercel_aspect = aspect_map.get(aspect_ratio, "16:9")
+
+    if job_type == "image":
+        payload = {
+            "model": vercel_model,
+            "prompt": prompt,
+            "n": 1,
+            "aspect_ratio": vercel_aspect,
+            "providerOptions": {
+                "xai": {
+                    "aspect_ratio": vercel_aspect,
+                }
+            },
+        }
+
+        print(f"[Vercel AI Gateway] Image request: model={vercel_model}, aspect_ratio={vercel_aspect}")
+
+        try:
+            response = requests.post(
+                f"{vercel_base_url}/images/generations",
+                headers=headers,
+                json=payload,
+                timeout=120,
+            )
+
+            print(f"[Vercel AI Gateway] Image response status: {response.status_code}")
+
+            if response.status_code != 200:
+                raise Exception(f"Vercel AI Gateway error {response.status_code}: {response.text}")
+
+            result = response.json()
+            _preview = {k: (f"<b64 {len(v)} chars>" if k == "b64_json" else v)
+                        for item in result.get("data", []) for k, v in item.items()}
+            print(f"[Vercel AI Gateway] Image result: created={result.get('created')}, data={[_preview]}")
+
+            data = result.get("data", [])
+            if not data:
+                raise Exception("Vercel AI Gateway returned no image data")
+
+            image_data_item = data[0]
+            if image_data_item.get("b64_json"):
+                return {"success": True, "data": image_data_item["b64_json"], "type": job_type, "is_base64": True}
+            elif image_data_item.get("url"):
+                return {"success": True, "url": image_data_item["url"], "type": job_type}
+            else:
+                raise Exception("Vercel AI Gateway image response missing url/b64_json")
+
+        except Exception as e:
+            print(f"[Vercel AI Gateway] Image error: {str(e)}")
+            raise Exception(f"Vercel AI Gateway image generation failed: {str(e)}")
+
+    elif job_type == "video":
+        payload = {
+            "model": vercel_model,
+            "prompt": prompt,
+            "aspect_ratio": vercel_aspect,
+            "duration": duration or 6,
+        }
+
+        if input_image_url:
+            validate_image_format(input_image_url, ['jpg', 'jpeg', 'png', 'webp'], '[Vercel AI Gateway]')
+            payload["image"] = input_image_url
+
+        print(f"[Vercel AI Gateway] Video request: model={vercel_model}, aspect_ratio={vercel_aspect}, has_image={bool(input_image_url)}")
+
+        try:
+            response = requests.post(
+                f"{vercel_base_url}/video/generations",
+                headers=headers,
+                json=payload,
+                timeout=300,
+            )
+
+            print(f"[Vercel AI Gateway] Video response status: {response.status_code}")
+
+            if response.status_code != 200:
+                raise Exception(f"Vercel AI Gateway error {response.status_code}: {response.text}")
+
+            result = response.json()
+            print(f"[Vercel AI Gateway] Video result keys: {list(result.keys())}")
+
+            data = result.get("data", [])
+            if not data:
+                raise Exception("Vercel AI Gateway returned no video data")
+
+            video_url = data[0].get("url")
+            if not video_url:
+                raise Exception("Vercel AI Gateway video response missing url")
+
+            return {"video_url": video_url, "type": "video"}
+
+        except Exception as e:
+            print(f"[Vercel AI Gateway] Video error: {str(e)}")
+            raise Exception(f"Vercel AI Gateway video generation failed: {str(e)}")
+
+    else:
+        raise Exception(f"Unsupported job_type for Vercel AI Gateway: {job_type}")
+
+
+def generate_with_frenix_image(prompt, model, aspect_ratio, api_key, input_image_url=None, job_type="image", duration=5):
+    """
+    Generate image using Frenix API.
+    Base URL: https://api.frenix.sh/v1
+    Auth: Bearer {api_key}
+    Image: POST /v1/images/generations (OpenAI-compatible)
+    """
+    frenix_model = FRENIX_IMAGE_MODELS.get(model, model)
+
+    aspect_to_size = {
+        "1:1":  "1024x1024",
+        "16:9": "1792x1024",
+        "9:16": "1024x1792",
+        "4:3":  "1344x1024",
+        "3:4":  "1024x1344",
+        "3:2":  "1536x1024",
+        "2:3":  "1024x1536",
+    }
+    size = aspect_to_size.get(aspect_ratio, "1024x1024")
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    payload = {
+        "model": frenix_model,
+        "prompt": prompt,
+        "size": size,
+        "n": 1,
+    }
+
+    print(f"[Frenix] Image request: model={frenix_model}, size={size}")
+
+    try:
+        response = requests.post(
+            "https://api.frenix.sh/v1/images/generations",
+            headers=headers,
+            json=payload,
+            timeout=120,
+        )
+
+        print(f"[Frenix] Response status: {response.status_code}")
+
+        if response.status_code == 401:
+            raise Exception(f"Frenix error 401: invalid api key - {response.text}")
+        if response.status_code == 403:
+            raise Exception(f"Frenix error 403: tier restricted - {response.text}")
+        if response.status_code == 429:
+            raise Exception(f"Frenix error 429: rate limit - {response.text}")
+        if response.status_code != 200:
+            raise Exception(f"Frenix error {response.status_code}: {response.text}")
+
+        result = response.json()
+        data = result.get("data", [])
+        if not data:
+            raise Exception("Frenix returned no image data")
+
+        image_url = data[0].get("url")
+        if not image_url:
+            raise Exception("Frenix image response missing url")
+
+        return {"success": True, "url": image_url, "type": "image"}
+
+    except Exception as e:
+        print(f"[Frenix] Error: {str(e)}")
+        raise Exception(f"Frenix image generation failed: {str(e)}")
+
+
 def generate(prompt, model, aspect_ratio, api_key, provider_key=None, input_image_url=None, job_type="image", duration=5, **kwargs):
     endpoint_type = get_endpoint_type(provider_key, model)
     
@@ -2961,6 +3615,44 @@ def generate(prompt, model, aspect_ratio, api_key, provider_key=None, input_imag
             input_image_url=input_image_url,
             job_type=job_type,
             **kwargs
+        )
+    elif endpoint_type == "vercel_ai_gateway":
+        return generate_with_vercel_ai_gateway(
+            prompt=prompt,
+            model=model,
+            aspect_ratio=aspect_ratio,
+            api_key=api_key,
+            input_image_url=input_image_url,
+            job_type=job_type,
+            duration=duration
+        )
+    elif endpoint_type == "picsart":
+        return generate_with_picsart(
+            prompt=prompt,
+            model=model,
+            aspect_ratio=aspect_ratio,
+            api_key=api_key,
+            input_image_url=input_image_url,
+            job_type=job_type,
+        )
+    elif endpoint_type == "clipdrop":
+        return generate_with_clipdrop(
+            prompt=prompt,
+            model=model,
+            aspect_ratio=aspect_ratio,
+            api_key=api_key,
+            input_image_url=input_image_url,
+            job_type=job_type,
+        )
+    elif endpoint_type == "frenix":
+        return generate_with_frenix_image(
+            prompt=prompt,
+            model=model,
+            aspect_ratio=aspect_ratio,
+            api_key=api_key,
+            input_image_url=input_image_url,
+            job_type=job_type,
+            duration=duration
         )
     else:
         raise Exception(f"Unsupported endpoint type: {endpoint_type}")

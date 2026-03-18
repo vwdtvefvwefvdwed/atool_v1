@@ -2,7 +2,7 @@
 
 ## Overview
 
-Magic link emails are sent through a **4-provider cascade**. Each provider is attempted in order. If one fails for any reason, the system automatically falls back to the next, fires an ntfy notification, and logs to console.
+Magic link emails are sent through a **4-provider cascade with 2 full cycles**. Each provider is attempted in order. If one fails, the system automatically falls back to the next and fires an ntfy notification. After all 4 providers fail in cycle 1, the system **restarts from Brevo** (cycle 2). Only after cycle 2 is fully exhausted does it hard fail.
 
 ---
 
@@ -10,6 +10,9 @@ Magic link emails are sent through a **4-provider cascade**. Each provider is at
 
 ```
 User requests magic link
+        │
+        ▼
+━━━━━━━━━━━━━━━━━━━━━━ CYCLE 1 ━━━━━━━━━━━━━━━━━━━━━━
         │
         ▼
 ┌─────────────────┐
@@ -36,6 +39,33 @@ User requests magic link
 ┌─────────────────┐
 │   4. LOOPS      │  ← Last Resort
 │  (REST/requests)│
+└────────┬────────┘
+         │ success → email sent ✅
+         │ any error ↓  notify (NTFY_API_KEYS): "cycling back to Brevo"
+         ▼
+━━━━━━━━━━━━━━━━━━━━━━ CYCLE 2 ━━━━━━━━━━━━━━━━━━━━━━
+        │
+        ▼
+┌─────────────────┐
+│   1. BREVO      │  ← Primary (retry)
+└────────┬────────┘
+         │ success → email sent ✅
+         │ any error ↓  notify (NTFY_API_KEYS or NTFY_CRITICAL)
+         ▼
+┌─────────────────┐
+│  2. MAILTRAP    │  ← Secondary (retry)
+└────────┬────────┘
+         │ success → email sent ✅
+         │ any error ↓  notify (NTFY_API_KEYS or NTFY_CRITICAL)
+         ▼
+┌─────────────────┐
+│   3. RESEND     │  ← Tertiary (retry)
+└────────┬────────┘
+         │ success → email sent ✅
+         │ any error ↓  notify (NTFY_CRITICAL)
+         ▼
+┌─────────────────┐
+│   4. LOOPS      │  ← Last Resort (retry)
 └────────┬────────┘
          │ success → email sent ✅
          │ any error ↓
@@ -161,18 +191,19 @@ User requests magic link
 
 ### Error Handling
 
-| HTTP Status | Loops Error | ErrorType | Next Action |
-|---|---|---|---|
-| `400` | Missing fields, invalid payload, validation error | `LOOPS_BAD_REQUEST` | Hard fail + ntfy critical |
-| `401` | Invalid or missing API key | `LOOPS_UNAUTHORIZED` | Hard fail + ntfy critical |
-| `404` | `LOOPS_TRANSACTIONAL_ID` wrong or template deleted | `LOOPS_NOT_FOUND` | Hard fail + ntfy critical |
-| `409` | Idempotency key already used within 24 hours | `LOOPS_CONFLICT` | Hard fail + ntfy critical |
-| `429` | Rate limit exceeded | `LOOPS_RATE_LIMITED` | Hard fail + ntfy critical |
-| `500` | Loops-side internal server error | `LOOPS_SERVER_ERROR` | Hard fail + ntfy critical |
-| Network error | Timeout or DNS failure | `LOOPS_SEND_FAILED` | Hard fail + ntfy critical |
-| Any other | Unknown error | `LOOPS_SEND_FAILED` | Hard fail + ntfy critical |
+| HTTP Status | Loops Error | ErrorType | Cycle 1 Action | Cycle 2 Action |
+|---|---|---|---|---|
+| `400` | Missing fields, invalid payload, validation error | `LOOPS_BAD_REQUEST` | Cycle back to Brevo + ntfy `LOOPS_CYCLING_TO_BREVO` | Hard fail + ntfy critical |
+| `401` | Invalid or missing API key | `LOOPS_UNAUTHORIZED` | Cycle back to Brevo + ntfy `LOOPS_CYCLING_TO_BREVO` | Hard fail + ntfy critical |
+| `404` | `LOOPS_TRANSACTIONAL_ID` wrong or template deleted | `LOOPS_NOT_FOUND` | Cycle back to Brevo + ntfy `LOOPS_CYCLING_TO_BREVO` | Hard fail + ntfy critical |
+| `409` | Idempotency key already used within 24 hours | `LOOPS_CONFLICT` | Cycle back to Brevo + ntfy `LOOPS_CYCLING_TO_BREVO` | Hard fail + ntfy critical |
+| `429` | Rate limit exceeded | `LOOPS_RATE_LIMITED` | Cycle back to Brevo + ntfy `LOOPS_CYCLING_TO_BREVO` | Hard fail + ntfy critical |
+| `500` | Loops-side internal server error | `LOOPS_SERVER_ERROR` | Cycle back to Brevo + ntfy `LOOPS_CYCLING_TO_BREVO` | Hard fail + ntfy critical |
+| Network error | Timeout or DNS failure | `LOOPS_SEND_FAILED` | Cycle back to Brevo + ntfy `LOOPS_CYCLING_TO_BREVO` | Hard fail + ntfy critical |
+| Any other | Unknown error | `LOOPS_SEND_FAILED` | Cycle back to Brevo + ntfy `LOOPS_CYCLING_TO_BREVO` | Hard fail + ntfy critical |
 
-> When Loops fails, **all 4 providers are down**. The user sees:  
+> **Cycle 1:** When Loops fails, the system restarts from Brevo (cycle 2). ntfy fires `LOOPS_CYCLING_TO_BREVO` on `NTFY_API_KEYS`.  
+> **Cycle 2:** When Loops fails again, **all providers are truly exhausted**. The user sees:  
 > `"Email service temporarily unavailable. Please try again later."`  
 > A critical ntfy alert is fired: `"CRITICAL: ALL email providers are down"`
 

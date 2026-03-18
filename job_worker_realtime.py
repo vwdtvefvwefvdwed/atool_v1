@@ -17,8 +17,8 @@ from flask import Flask, jsonify
 from dotenv_vault import load_dotenv
 from postgrest.exceptions import APIError
 from multi_endpoint_manager import generate, get_endpoint_type
-from provider_api_keys import get_api_key_for_job, increment_usage_count, get_worker1_client, map_model_to_provider
-from api_key_rotation import handle_api_key_rotation, log_rotation_attempt
+from provider_api_keys import get_api_key_for_job, increment_usage_count, get_worker1_client, map_model_to_provider, get_all_api_keys_for_provider
+from api_key_rotation import handle_api_key_rotation, handle_roundrobin_rotation, log_rotation_attempt, NO_DELETE_ROTATE_PROVIDERS
 from error_notifier import notify_error, ErrorType
 from model_quota_manager import ensure_quota_manager_started, get_quota_manager
 from cloudinary_manager import get_cloudinary_manager
@@ -108,8 +108,12 @@ MODELS_REQUIRING_INPUT_IMAGE = [
     'ultra-fast-nano-banana-2',
     'black-forest-labs/flux-kontext-pro',
     'topazlabs/image-upscale',
-    'sczhou/codeformer',
+    'sczhou/CodeFormer',
+    'finegrain/finegrain-image-enhancer',
     'tencentarc/gfpgan',
+    'picsart-ultra-upscale',
+    'picsart-upscale',
+    'clipdrop-upscale',
     'remove-bg',
     'bria_gen_fill',
     'bria_erase',
@@ -191,10 +195,19 @@ def enqueue_job(provider_key, job):
     """Add job to provider's queue. MUST be called while holding the provider lock."""
     if provider_key not in provider_job_queues:
         provider_job_queues[provider_key] = []
-    
+
+    job_id = job.get("job_id") or job.get("id")
+
+    already_queued = any(
+        (j.get("job_id") or j.get("id")) == job_id
+        for j in provider_job_queues[provider_key]
+    )
+    if already_queued:
+        print(f"[QUEUE] Job {job_id} already in queue for {provider_key} — skipping duplicate")
+        return
+
     provider_job_queues[provider_key].append(job)
     queue_length = len(provider_job_queues[provider_key])
-    job_id = job.get("job_id") or job.get("id")
     print(f"[QUEUE] Job {job_id} queued for provider {provider_key} (queue length: {queue_length})")
 
 def process_next_queued_job(provider_key):
@@ -335,7 +348,7 @@ def mark_job_failed(job_id, error_message):
         return False
 
 
-MAX_PENDING_RETRIES = 5
+MAX_PENDING_RETRIES = 2
 
 
 _NO_API_KEY_MARKERS = (
@@ -399,6 +412,8 @@ def reset_job_to_pending(job_id, provider_key, error_message):
                 )
                 return False
             meta["pending_retry_count"] = retry_count + 1
+            import datetime as _dt
+            meta["retry_after"] = (_dt.datetime.utcnow() + _dt.timedelta(seconds=30)).isoformat()
             _main_sb.table("jobs").update({"metadata": meta}).eq("job_id", job_id).execute()
             print(f"[RESET] Job {job_id} pending retry {retry_count + 1}/{MAX_PENDING_RETRIES}")
             _retry_count_ok = True
@@ -844,6 +859,22 @@ def _process_job_with_concurrency_control_inner(job):
     """Inner implementation of concurrency-controlled job processing."""
     job_id = job.get("job_id") or job.get("id")
 
+    # Enforce retry_after delay — realtime fires instantly when job resets to
+    # pending, but we want a ~30s gap before the next attempt.
+    _meta_check = job.get("metadata") or {}
+    _retry_after_str = _meta_check.get("retry_after")
+    if _retry_after_str:
+        try:
+            import datetime as _dt
+            _retry_after = _dt.datetime.fromisoformat(_retry_after_str)
+            _now = _dt.datetime.utcnow()
+            if _now < _retry_after:
+                _wait = (_retry_after - _now).total_seconds()
+                print(f"[RETRY-DELAY] Job {job_id} not ready yet — waiting {_wait:.1f}s before retry")
+                time.sleep(_wait)
+        except Exception:
+            pass
+
     # Check priority lock mode - only allow Priority 1 jobs
     if _priority_lock_active:
         metadata = job.get("metadata") or {}
@@ -864,13 +895,22 @@ def _process_job_with_concurrency_control_inner(job):
     model = job.get("model", "")
 
     metadata = job.get("metadata", {})
-    provider_key = metadata.get("provider_key") or job.get("provider_key")
 
-    if not provider_key:
-        video_indicators = ["video", "wan", "minimax", "luma", "topaz"]
-        if job_type == "image" and any(v in model.lower() for v in video_indicators):
-            job_type = "video"
-        provider_key = map_model_to_provider(model, job_type=job_type)
+    video_indicators = ["video", "wan", "minimax", "luma", "topaz"]
+    if job_type == "image" and model and any(v in model.lower() for v in video_indicators):
+        job_type = "video"
+
+    _default_providers = {"vision-nova", "cinematic-nova"}
+    if model and job_type != "workflow":
+        model_provider = map_model_to_provider(model, job_type=job_type)
+        if model_provider not in _default_providers:
+            provider_key = model_provider
+        else:
+            provider_key = metadata.get("provider_key") or job.get("provider_key") or model_provider
+    else:
+        provider_key = metadata.get("provider_key") or job.get("provider_key")
+        if not provider_key:
+            provider_key = map_model_to_provider(model, job_type=job_type)
 
     required_models = [] if job_type == "workflow" else ([model] if model else [])
     coordinator = get_job_coordinator()
@@ -956,7 +996,9 @@ def process_job(job):
     
     metadata = job.get("metadata", {})
     provider_key = metadata.get("provider_key") or job.get("provider_key")
-    
+    if not provider_key and model:
+        provider_key = map_model_to_provider(model, job_type=job_type)
+
     endpoint_type = get_endpoint_type(provider_key, model)
     print(f"Provider: {provider_key}")
     print(f"Endpoint: {endpoint_type.upper()}")
@@ -1213,8 +1255,9 @@ def process_video_job(job):
             "failed to download input image" in error_message.lower()
         )
         is_cloudinary_error = "cloudinary" in error_message.lower() and not is_input_image_error
-        is_timeout_error = any(x in error_message.lower() for x in ["timeout", "timed out", "read timeout", "connection timeout"])
+        is_timeout_error = any(x in error_message.lower() for x in ["timeout", "timed out", "read timeout", "connection timeout", "504"])
         is_network_error = any(x in error_message.lower() for x in ["connection", "httpsconnectionpool", "unable to connect", "network", "unreachable"])
+        is_vercel_payload_error = "413" in error_message or "function_payload_too_large" in error_message.lower()
         
         # Only mark as validation error if it's specifically about user input (not API errors)
         # Be very specific to avoid false positives with API errors
@@ -1239,6 +1282,11 @@ def process_video_job(job):
             user_message = error_message.split("IMAGE_NOT_SUPPORTED:", 1)[-1].strip()
             print(f"[IMAGE NOT SUPPORTED] Marking job {job_id} as FAILED (not retryable): {user_message}")
             mark_job_failed(job_id, f"⚠️ {user_message}")
+            return
+
+        if is_vercel_payload_error:
+            print(f"[VERCEL PAYLOAD ERROR] Request/response payload too large (413) - NOT rotating API key")
+            mark_job_failed(job_id, "⚠️ The generated content exceeded the size limit. Please try a shorter duration or simpler prompt.")
             return
 
         if is_completion_error:
@@ -1396,7 +1444,11 @@ def process_image_job(job):
             error_msg = result.get("error", "Generation failed")
             raise Exception(error_msg)
         
-        if result.get("is_base64"):
+        if result.get("is_raw_bytes"):
+            print(f"Generation returned raw bytes, using directly...")
+            image_data = result.get("data")
+            print(f"[RawBytes] Data length: {len(image_data)} bytes")
+        elif result.get("is_base64"):
             print(f"Generation returned base64 data, uploading directly...")
             b64_data = result.get("data")
             
@@ -1418,27 +1470,7 @@ def process_image_job(job):
         else:
             image_url = result.get("url")
             print(f"Generation successful: {image_url}")
-            
-            print(f"Downloading image from: {image_url}")
-            img_response = requests.get(image_url, timeout=60)
-            
-            if img_response.status_code != 200:
-                raise Exception(f"Failed to download image: {img_response.status_code}")
-            
-            image_data = img_response.content
-        
-        image_size_mb = len(image_data) / (1024 * 1024)
-        print(f"Image data: {len(image_data)} bytes ({image_size_mb:.2f} MB)")
-        
-        max_cloudinary_size_mb = 10
-        if image_size_mb > max_cloudinary_size_mb:
-            print(f"[INFO] Image size ({image_size_mb:.2f} MB) exceeds Cloudinary limit ({max_cloudinary_size_mb} MB)")
-            print(f"[COMPRESSION] Compressing image...")
-            image_data = compress_image_to_size(image_data, max_size_mb=8)
-            new_size_mb = len(image_data) / (1024 * 1024)
-            print(f"[COMPRESSION] Compressed to {new_size_mb:.2f} MB")
-        elif image_size_mb > 50:
-            print(f"[WARNING] Image size is {image_size_mb:.2f} MB")
+            image_data = None
         
         # Truncate prompt to avoid Cloudinary context field length limits (max ~1000 chars)
         prompt_text = job.get("prompt", "")
@@ -1458,12 +1490,35 @@ def process_image_job(job):
         try:
             cloudinary_manager = get_cloudinary_manager()
             
-            upload_result = cloudinary_manager.upload_image_from_bytes(
-                image_bytes=image_data,
-                file_name=f"job_{job_id}.png",
-                folder_name="ai-generated-images",
-                metadata=upload_metadata
-            )
+            if image_data is None and image_url:
+                print(f"[Cloudinary] Attempting URL-based upload (Cloudinary fetches from source)...")
+                upload_result = cloudinary_manager.upload_image_from_url(
+                    image_url=image_url,
+                    file_name=f"job_{job_id}.png",
+                    folder_name="ai-generated-images",
+                    metadata=upload_metadata
+                )
+                if not upload_result.get("success"):
+                    print(f"[Cloudinary] URL upload failed, falling back to download: {upload_result.get('error')}")
+                    print(f"Downloading image from: {image_url}")
+                    img_response = requests.get(image_url, timeout=60)
+                    if img_response.status_code != 200:
+                        raise Exception(f"Failed to download image: {img_response.status_code}")
+                    image_data = img_response.content
+            
+            if image_data is not None:
+                image_size_mb = len(image_data) / (1024 * 1024)
+                print(f"Image data: {len(image_data)} bytes ({image_size_mb:.2f} MB)")
+                if image_size_mb > 10:
+                    print(f"[COMPRESSION] Compressing image from {image_size_mb:.2f} MB...")
+                    image_data = compress_image_to_size(image_data, max_size_mb=8)
+                    print(f"[COMPRESSION] Compressed to {len(image_data) / (1024*1024):.2f} MB")
+                upload_result = cloudinary_manager.upload_image_from_bytes(
+                    image_bytes=image_data,
+                    file_name=f"job_{job_id}.png",
+                    folder_name="ai-generated-images",
+                    metadata=upload_metadata
+                )
             
             if not upload_result.get("success"):
                 error_msg = upload_result.get("error", "Unknown error")
@@ -1554,8 +1609,10 @@ def process_image_job(job):
             "failed to download input image" in error_message.lower()
         )
         is_cloudinary_error = "cloudinary" in error_message.lower() and not is_input_image_error
-        is_timeout_error = any(x in error_message.lower() for x in ["timeout", "timed out", "read timeout", "connection timeout"])
+        is_timeout_error = any(x in error_message.lower() for x in ["timeout", "timed out", "read timeout", "connection timeout", "504"])
         is_network_error = any(x in error_message.lower() for x in ["connection", "httpsconnectionpool", "unable to connect", "network", "unreachable"])
+        is_vercel_payload_error = "413" in error_message or "function_payload_too_large" in error_message.lower()
+        is_hf_space_error = ".hf.space" in error_message.lower() or "huggingface.co/models" in error_message.lower()
         
         # Only mark as validation error if it's specifically about user input (not API errors)
         # Be very specific to avoid false positives with API errors
@@ -1580,6 +1637,11 @@ def process_image_job(job):
             user_message = error_message.split("IMAGE_NOT_SUPPORTED:", 1)[-1].strip()
             print(f"[IMAGE NOT SUPPORTED] Marking job {job_id} as FAILED (not retryable): {user_message}")
             mark_job_failed(job_id, f"⚠️ {user_message}")
+            return
+
+        if is_vercel_payload_error:
+            print(f"[VERCEL PAYLOAD ERROR] Request/response payload too large (413) - NOT rotating API key")
+            mark_job_failed(job_id, "⚠️ The generated image exceeded the size limit. Please try a different prompt.")
             return
 
         if is_removebg_foreground_error:
@@ -1616,6 +1678,12 @@ def process_image_job(job):
             reset_job_to_pending(job_id, provider_key, f"Network/Timeout error: {error_message}")
             return
         
+        if is_hf_space_error:
+            print(f"[HF SPACE ERROR] HuggingFace Space error - NOT rotating API key")
+            print(f"[HF SPACE ERROR] Resetting job to PENDING for retry")
+            reset_job_to_pending(job_id, provider_key, f"HuggingFace Space error: {error_message}")
+            return
+        
         if is_validation_error:
             print(f"[VALIDATION ERROR] User input validation failed - NOT rotating API key")
             print(f"[VALIDATION ERROR] Error: {error_message}")
@@ -1626,30 +1694,65 @@ def process_image_job(job):
         # All other errors (API errors, provider errors, etc.) - attempt key rotation and retry
         if api_key_id and provider_key:
             print(f"[API ERROR] Provider API error detected - attempting key rotation")
-            print(f"[ROTATION] Attempting to rotate API key...")
-            rotation_success, next_key = handle_api_key_rotation(
-                api_key_id,
-                provider_key,
-                error_message,
-                job_id
-            )
-            log_rotation_attempt(job_id, provider_key, api_key_id,
-                               next_key.get("id") if next_key else None,
-                               error_message, rotation_success)
-            
-            if rotation_success and next_key:
-                print(f"[RETRY] Retrying image job with new API key...")
-                return process_image_job(job)
-            else:
-                print(f"[ERROR] API key rotation failed or no keys available")
-                notify_error(
-                    ErrorType.API_KEY_ROTATION_FAILED,
-                    f"API key rotation failed for {provider_key}",
-                    context={"provider": provider_key, "job_id": job_id, "error": error_message}
+
+            if provider_key in NO_DELETE_ROTATE_PROVIDERS:
+                # No-delete round-robin rotation with 2-cycle limit (per job)
+                rr_count = job.get("_rr_rotation_count", 0)
+                all_keys = get_all_api_keys_for_provider(provider_key)
+                total_keys = max(len(all_keys), 1)
+                max_attempts = total_keys * 2
+
+                print(f"[RR-ROTATION] No-delete provider '{provider_key}' | attempt {rr_count + 1} of {max_attempts} max")
+
+                if rr_count >= max_attempts:
+                    print(f"[RR-ROTATION] 2 full cycles completed for '{provider_key}' - failing job")
+                    mark_job_failed(job_id, f"All API keys for {provider_key} failed after 2 full rotation cycles. Please try again later.")
+                    return
+
+                rotation_success, next_key = handle_roundrobin_rotation(
+                    provider_key,
+                    error_message,
+                    job_id
                 )
-                reset_job_to_pending(job_id, provider_key, f"No API key available for provider: {provider_key}")
-                return
-        
+                log_rotation_attempt(job_id, provider_key, api_key_id,
+                                   next_key.get("id") if next_key else None,
+                                   error_message, rotation_success)
+
+                if rotation_success and next_key:
+                    job["_rr_rotation_count"] = rr_count + 1
+                    print(f"[RR-ROTATION] Retrying image job (attempt {rr_count + 1}/{max_attempts})...")
+                    return process_image_job(job)
+                else:
+                    print(f"[RR-ROTATION] No keys available for '{provider_key}' - failing job")
+                    mark_job_failed(job_id, f"No API keys available for provider: {provider_key}")
+                    return
+
+            else:
+                # Standard rotation: delete failing key, get next (all other providers unchanged)
+                print(f"[ROTATION] Attempting to rotate API key...")
+                rotation_success, next_key = handle_api_key_rotation(
+                    api_key_id,
+                    provider_key,
+                    error_message,
+                    job_id
+                )
+                log_rotation_attempt(job_id, provider_key, api_key_id,
+                                   next_key.get("id") if next_key else None,
+                                   error_message, rotation_success)
+
+                if rotation_success and next_key:
+                    print(f"[RETRY] Retrying image job with new API key...")
+                    return process_image_job(job)
+                else:
+                    print(f"[ERROR] API key rotation failed or no keys available")
+                    notify_error(
+                        ErrorType.API_KEY_ROTATION_FAILED,
+                        f"API key rotation failed for {provider_key}",
+                        context={"provider": provider_key, "job_id": job_id, "error": error_message}
+                    )
+                    reset_job_to_pending(job_id, provider_key, f"No API key available for provider: {provider_key}")
+                    return
+
         # Catch-all for any other errors (reset to pending for retry)
         print(f"[UNKNOWN ERROR] Unhandled error type - resetting to PENDING for retry")
         print(f"[UNKNOWN ERROR] Error: {error_message}")
@@ -1999,6 +2102,23 @@ async def realtime_listener():
                     _spawn_workflow_thread(_start_new_workflow, name=f"NewWF-{job_id}")
                     return
                 
+                # Skip UPDATE events for image/video jobs — same policy as workflow jobs.
+                # When a job is reset to pending (network error, retry), Supabase fires an
+                # UPDATE event here.  The _deferred_retry thread (30s delay) already handles
+                # re-processing.  Spawning ANOTHER thread from the realtime UPDATE causes the
+                # same job to pile up in the provider queue multiple times.
+                _img_event_type = (
+                    payload.get("eventType")
+                    or payload.get("data", {}).get("eventType", "INSERT")
+                )
+                if _img_event_type == "UPDATE":
+                    print(
+                        f"[REALTIME] UPDATE event for job {job_id} ({job_type}) skipped — "
+                        f"_deferred_retry or coordinator will dispatch it"
+                    )
+                    sys.stdout.flush()
+                    return
+
                 print(f"\n{'='*70}")
                 print(f"NEW JOB RECEIVED VIA REALTIME!")
                 print(f"{'='*70}")
@@ -2104,19 +2224,13 @@ async def realtime_listener():
         print(f"Subscription result: {subscription_result}")
         print("Subscribed to new job INSERT events (Realtime active)")
 
-        # Also subscribe to UPDATE events so that jobs reset to 'pending' (e.g. after
-        # reset_job_to_pending() which does an UPDATE, not an INSERT) are picked up
-        # immediately instead of waiting for the 30s deferred retry or 10-min sweep.
-        # handle_new_job() already guards status != 'pending' and re-checks DB status
-        # inside process_job(), so duplicate processing is prevented.
-        update_channel = async_client.channel("job-worker-pending-updates")
-        await update_channel.on_postgres_changes(
-            event="UPDATE",
-            schema="public",
-            table="jobs",
-            callback=handle_new_job
-        ).subscribe()
-        print("Subscribed to job UPDATE events (catches reset-to-pending jobs)")
+        # NOTE: We intentionally do NOT subscribe to UPDATE events here.
+        # Jobs reset to 'pending' after a transient error are handled by two dedicated paths:
+        #   1. _deferred_retry thread (spawned by reset_job_to_pending for non-key errors) — 30s delay
+        #   2. handle_api_key_insertion (for key-related errors, fires when a new key is inserted)
+        # Subscribing to UPDATE events caused a race condition where a third thread was spawned
+        # for the same job, racing with the above two dedicated handlers and causing the job to
+        # get stuck in 'running' state (all subsequent threads see status='running' and skip).
         print()
         print("NOTE: If events don't arrive, check Supabase Dashboard:")
         print("   Database -> Replication -> Enable Realtime for 'jobs' table")
@@ -2434,13 +2548,17 @@ def handle_api_key_insertion(payload):
                 print(f"   Prompt: {prompt}...")
 
                 try:
-                    requests.post(
-                        f"{BACKEND_URL}/worker/job/{job_id}/progress",
-                        json={"progress": 5, "message": "API key now available, starting generation..."},
-                        timeout=10,
-                        verify=VERIFY_SSL
-                    )
+                    from supabase_client import supabase as _sb_check
+                    _status_check = _sb_check.table("jobs").select("status").eq("job_id", job_id).single().execute()
+                    if _status_check.data:
+                        _current = _status_check.data.get("status")
+                        if _current not in ("pending",):
+                            print(f"   ⏭ Job {job_id} status is '{_current}' — already being processed, skipping\n")
+                            continue
+                except Exception as _sc_err:
+                    print(f"   [WARN] Could not verify status for {job_id}: {_sc_err} — proceeding anyway")
 
+                try:
                     job_thread = threading.Thread(
                         target=process_job_with_concurrency_control,
                         args=(job,),

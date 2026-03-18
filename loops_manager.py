@@ -132,7 +132,7 @@ def _classify_error(error: Exception) -> tuple:
 def notify_loops_failed(error: Exception, to_email: str) -> None:
     """
     Classify the Loops error and fire the matching ntfy notification.
-    Called when all 4 providers have failed.
+    Called when all 4 providers have failed on the final cycle.
     """
     error_type, message = _classify_error(error)
 
@@ -142,5 +142,23 @@ def notify_loops_failed(error: Exception, to_email: str) -> None:
         context={
             "error": str(error)[:300],
             "action_required": "Check all email provider accounts and API keys",
+        },
+    )
+
+
+def notify_loops_cycling(error: Exception, to_email: str, cycle: int, max_cycles: int) -> None:
+    """
+    Classify the Loops error and fire a non-critical ntfy notification.
+    Called when Loops fails but we are cycling back to Brevo for another attempt.
+    """
+    error_type, message = _classify_error(error)
+
+    notify_error(
+        ErrorType.LOOPS_CYCLING_TO_BREVO,
+        f"Loops failed (cycle {cycle}/{max_cycles}) — {message} — restarting from Brevo (recipient: {to_email})",
+        context={
+            "error": str(error)[:300],
+            "cycle": f"{cycle}/{max_cycles}",
+            "action": "Cycling back to Brevo and retrying full provider chain",
         },
     )

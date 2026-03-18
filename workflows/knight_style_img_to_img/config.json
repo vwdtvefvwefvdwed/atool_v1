@@ -16,7 +16,7 @@
       "nano-banana-pro-leonardo"
     ],
     "upscale": [
-      "stability-upscale-fast"
+      "clipdrop-upscale"
     ]
   },
   "steps": [
@@ -40,10 +40,10 @@
       "id": 2,
       "name": "upscale",
       "type": "generation",
-      "description": "Fast 4x upscale with Stability AI (2 credits)",
+      "description": "Fast upscale with Clipdrop (2 credits)",
       "model_type": "image",
-      "default_model": "stability-upscale-fast",
-      "provider": "vision-stabilityai"
+      "default_model": "clipdrop-upscale",
+      "provider": "vision-clipdrop"
     }
   ],
   "estimated_duration_seconds": 60,

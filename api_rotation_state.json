@@ -16,5 +16,26 @@
   },
   "vision-stabilityai": {
     "current_row": 1
+  },
+  "vision-vercel": {
+    "current_row": 1
+  },
+  "vision-huggingface": {
+    "current_row": 1
+  },
+  "vision-picsart": {
+    "current_row": 1
+  },
+  "vision-clipdrop": {
+    "current_row": 1
+  },
+  "vision-frenix": {
+    "current_row": 1
+  },
+  "vision-atlas": {
+    "current_row": 1
+  },
+  "vision-deapi": {
+    "current_row": 1
   }
 }

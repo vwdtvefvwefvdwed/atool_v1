@@ -655,6 +655,77 @@ class CloudinaryManager:
                 "error": str(e)
             }
     
+    def upload_image_from_url(self, image_url, file_name, folder_name="ai-generated-images", metadata=None, eager=None):
+        """Upload an image to Cloudinary directly from a URL — Cloudinary fetches it server-side"""
+        try:
+            print(f"[CLOUDINARY MANAGER] Uploading image from URL: {file_name}")
+
+            upload_params = {
+                "folder": folder_name,
+                "resource_type": "image",
+                "overwrite": False,
+                "unique_filename": True,
+                "timeout": 120,
+            }
+
+            if eager:
+                upload_params["eager"] = eager
+                upload_params["eager_async"] = False
+
+            if metadata:
+                if 'prompt' in metadata:
+                    original_prompt = metadata['prompt']
+                    metadata['prompt'] = sanitize_for_cloudinary(original_prompt)
+                    if len(metadata['prompt']) > 1000:
+                        metadata['prompt'] = metadata['prompt'][:997] + "..."
+
+                context_pairs = []
+                for k, v in metadata.items():
+                    if v:
+                        safe_value = str(v).replace('|', '_').replace('=', '-')
+                        context_pairs.append(f"{k}={safe_value}")
+
+                if context_pairs:
+                    context_str = "|".join(context_pairs)
+                    if len(context_str) > 2000:
+                        context_str = context_str[:1997] + "..."
+                    upload_params["context"] = context_str
+
+            upload_result = self.upload_with_retry(
+                cloudinary.uploader.upload,
+                image_url,
+                **upload_params
+            )
+
+            current = self.get_current_account()
+            print(f"[CLOUDINARY MANAGER] Image uploaded from URL successfully to {current['name']}")
+
+            final_secure_url = upload_result['secure_url']
+            final_url = upload_result['url']
+
+            print(f"[CLOUDINARY MANAGER] URL: {final_secure_url}")
+
+            return {
+                "success": True,
+                "public_url": final_url,
+                "secure_url": final_secure_url,
+                "file_name": file_name,
+                "public_id": upload_result['public_id'],
+                "width": upload_result.get('width'),
+                "height": upload_result.get('height'),
+                "format": upload_result.get('format'),
+                "account_used": current['name']
+            }
+
+        except Exception as e:
+            print(f"[CLOUDINARY MANAGER ERROR] URL upload failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return {
+                "success": False,
+                "error": str(e)
+            }
+
     def upload_video(self, video_path, job_id=None, folder_name="ai-generated-videos", metadata=None):
         """
         Upload a video to Cloudinary with automatic account rotation

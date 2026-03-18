@@ -178,6 +178,7 @@ def map_model_to_provider(model_name: str, job_type: str = "image") -> Optional[
     - vision-removebg -> Remove.bg API
     - vision-bria, cinematic-bria -> Bria AI API
     - vision-leonardo, cinematic-leonardo -> Leonardo AI API
+    - vision-vercel, cinematic-vercel -> Vercel AI Gateway API
     
     Args:
         model_name: Name of the AI model
@@ -210,6 +211,8 @@ def map_model_to_provider(model_name: str, job_type: str = "image") -> Optional[
         ],
         "vision-huggingface": [
             "AP123/IllusionDiffusion",
+            "finegrain/finegrain-image-enhancer",
+            "sczhou/CodeFormer",
         ],
         "vision-ultrafast": [
             "ultra-fast-nano",
@@ -258,7 +261,21 @@ def map_model_to_provider(model_name: str, job_type: str = "image") -> Optional[
         "vision-leonardo": [
             "ideogram-3.0",
             "nano-banana-pro-leonardo",
-        ]
+        ],
+        "vision-vercel": [
+            "grok-imagine-image",
+        ],
+        "vision-picsart": [
+            "picsart-ultra-upscale",
+            "picsart-upscale",
+        ],
+        "vision-clipdrop": [
+            "clipdrop-upscale",
+        ],
+        "vision-frenix": [
+            "frenix-dirtberry",
+            "frenix-flux-2-pro",
+        ],
     }
     
     # Video providers
@@ -270,6 +287,8 @@ def map_model_to_provider(model_name: str, job_type: str = "image") -> Optional[
         ],
         "cinematic-pro": [
             "kling-2.6",
+            "grok-text-to-video",
+            "grok-image-to-video",
         ],
         "cinematic-bria": [
             "bria_video_erase",
@@ -281,6 +300,10 @@ def map_model_to_provider(model_name: str, job_type: str = "image") -> Optional[
         ],
         "cinematic-leonardo": [
             "seedance-1.0-pro-fast",
+        ],
+        "cinematic-vercel": [
+            "grok-text-to-video-2",
+            "grok-image-to-video-2",
         ],
     }
     

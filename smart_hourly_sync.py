@@ -123,43 +123,72 @@ def update_sync_metadata(new_client: Client, status: str, last_sync_time: str,
         print_warning(f"Could not update sync metadata: {e}")
 
 
-def sync_user_dependencies(old_client: Client, new_client: Client, user_ids: set) -> int:
+def sync_user_dependencies(old_client: Client, new_client: Client, user_ids: set) -> tuple:
     """
-    Sync missing users that are referenced by jobs/sessions but don't exist in NEW account
-    
-    Args:
-        old_client: Supabase client for OLD account
-        new_client: Supabase client for NEW account
-        user_ids: Set of user IDs to sync
-        
+    Sync missing users that are referenced by jobs/sessions but don't exist in NEW account.
+    When a user already exists in NEW with the same email but a different UUID, builds a
+    remap dict so child records can be rewritten to use the NEW UUID before upserting.
+
     Returns:
-        Number of users synced
+        (synced_count: int, user_id_remap: dict)
+        user_id_remap maps {old_uuid: new_uuid} for any ID mismatches found.
     """
     if not user_ids:
-        return 0
-    
+        return 0, {}
+
+    user_id_remap: dict = {}
+
     try:
         print_info(f"   Syncing {len(user_ids)} missing parent users...")
-        
-        # Fetch users from OLD account
+
         users_data = old_client.table('users')\
             .select('*')\
             .in_('id', list(user_ids))\
             .execute()
-        
+
         if not users_data.data or len(users_data.data) == 0:
             print_warning(f"   Could not find users in OLD account: {user_ids}")
-            return 0
-        
-        # Upsert to NEW account
-        new_client.table('users').upsert(users_data.data).execute()
-        synced = len(users_data.data)
-        print_success(f"   Synced {synced} missing users")
-        return synced
-        
+            return 0, {}
+
+        synced = 0
+        for user in users_data.data:
+            try:
+                new_client.table('users').upsert(user).execute()
+                synced += 1
+            except Exception as e:
+                err_str = str(e)
+                if '23505' in err_str and 'email' in err_str:
+                    email = user.get('email')
+                    old_id = user.get('id')
+                    try:
+                        existing = new_client.table('users')\
+                            .select('id')\
+                            .eq('email', email)\
+                            .limit(1)\
+                            .execute()
+                        if existing.data:
+                            new_id = existing.data[0]['id']
+                            if new_id != old_id:
+                                user_id_remap[old_id] = new_id
+                                print_warning(f"   Email conflict for {email}: remapping {old_id} → {new_id}")
+                            else:
+                                synced += 1
+                        else:
+                            print_error(f"   Could not find user by email after conflict: {email}")
+                    except Exception as lookup_err:
+                        print_error(f"   Failed to resolve email conflict for {email}: {lookup_err}")
+                else:
+                    print_error(f"   Error syncing user {user.get('id')}: {e}")
+
+        if synced:
+            print_success(f"   Synced {synced} missing users")
+        if user_id_remap:
+            print_info(f"   ID remap table built for {len(user_id_remap)} user(s)")
+        return synced, user_id_remap
+
     except Exception as e:
         print_error(f"   Error syncing missing users: {e}")
-        return 0
+        return 0, {}
 
 
 def sync_table(old_client: Client, new_client: Client, table_name: str, 
@@ -197,24 +226,34 @@ def sync_table(old_client: Client, new_client: Client, table_name: str,
         total_records = len(data.data)
         print_info(f"{table_name}: Found {total_records} new/updated records")
         
-        # Check for missing parent users if syncing jobs, sessions, ad_sessions, shared_results, or workflow_executions
-        if table_name in ['jobs', 'sessions', 'ad_sessions', 'shared_results', 'workflow_executions'] and total_records > 0:
-            # Extract unique user_ids from the data
+        user_id_remap: dict = {}
+
+        if table_name in ['jobs', 'sessions', 'ad_sessions', 'shared_results', 'workflow_executions', 'usage_logs'] and total_records > 0:
             user_ids = set(record.get('user_id') for record in data.data if record.get('user_id'))
-            
+
             if user_ids:
-                # Check which users don't exist in NEW account
                 existing_users = new_client.table('users')\
                     .select('id')\
                     .in_('id', list(user_ids))\
                     .execute()
-                
+
                 existing_user_ids = set(u['id'] for u in existing_users.data) if existing_users.data else set()
                 missing_user_ids = user_ids - existing_user_ids
-                
+
                 if missing_user_ids:
                     print_warning(f"   Found {len(missing_user_ids)} users not in NEW account")
-                    sync_user_dependencies(old_client, new_client, missing_user_ids)
+                    _, user_id_remap = sync_user_dependencies(old_client, new_client, missing_user_ids)
+
+        if user_id_remap:
+            records = []
+            for record in data.data:
+                uid = record.get('user_id')
+                if uid and uid in user_id_remap:
+                    record = {**record, 'user_id': user_id_remap[uid]}
+                records.append(record)
+            data_records = records
+        else:
+            data_records = data.data
         
         # Check for missing parent jobs for workflow_executions (FK: job_id -> jobs.job_id)
         if table_name == 'workflow_executions' and total_records > 0:
@@ -239,23 +278,19 @@ def sync_table(old_client: Client, new_client: Client, table_name: str,
                     except Exception as job_sync_err:
                         print_error(f"   Failed to sync missing parent jobs: {job_sync_err}")
         
-        # Process in batches to avoid memory issues
         synced_count = 0
         for i in range(0, total_records, batch_size):
-            batch = data.data[i:i + batch_size]
-            
+            batch = data_records[i:i + batch_size]
+
             try:
-                # Upsert to NEW account (insert or update if exists)
-                # This handles both new records and updates to existing ones
                 new_client.table(table_name).upsert(batch).execute()
                 synced_count += len(batch)
-                
+
                 if total_records > batch_size:
                     print_info(f"   Batch {i//batch_size + 1}: {len(batch)} records synced")
-                    
+
             except Exception as batch_error:
                 print_error(f"   Batch {i//batch_size + 1} failed: {batch_error}")
-                # Continue with next batch instead of failing entire sync
                 continue
         
         print_success(f"{table_name}: {synced_count}/{total_records} records synced successfully")

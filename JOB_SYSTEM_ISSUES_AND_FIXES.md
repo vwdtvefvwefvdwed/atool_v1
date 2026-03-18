@@ -935,3 +935,98 @@ result = _sb.table("jobs")\
 ```
 
 Coordinator-blocked jobs are excluded from both the HTTP API path and the direct DB fallback. They will be promoted by `coordinator.process_next_queued_job()` when their blocker completes, with their original `queued_at` intact.
+
+---
+
+## Issue #21 — CRITICAL: UPDATE channel subscription causes race condition → jobs stuck in `running`
+
+**File**: `job_worker_realtime.py` → `realtime_listener()`
+
+### Root Cause
+
+A second Supabase realtime channel (`job-worker-pending-updates`) was subscribed to **all job UPDATE events** and called the same `handle_new_job()` callback that processes new INSERT jobs:
+
+```python
+# BEFORE (broken) — inside realtime_listener()
+update_channel = async_client.channel("job-worker-pending-updates")
+await update_channel.on_postgres_changes(
+    event="UPDATE",
+    schema="public",
+    table="jobs",
+    callback=handle_new_job   # ← same callback as INSERT channel
+).subscribe()
+```
+
+When `reset_job_to_pending()` updated a job's status to `'pending'`, Supabase fired this UPDATE event. `handle_new_job()` has an inner guard (`if _img_event_type == "UPDATE": return`) but it was silently failing: `payload.get("eventType")` returned `None` (not present at the top level of the Supabase SDK payload), and the fallback `payload.get("data", {}).get("eventType", "INSERT")` defaulted to `"INSERT"` — bypassing the guard entirely.
+
+### Race Condition Sequence
+
+```
+reset_job_to_pending()
+  ├── DB UPDATE (status → 'pending', retry_after = now+30s)
+  ├── _deferred_retry thread spawned (non-key errors only) — sleeps 30s
+  └── Supabase UPDATE event fires → UPDATE channel → handle_new_job() → Thread C spawned
+
+Thread A (_deferred_retry or handle_api_key_insertion):
+  └── provider lock acquired → coordinator → BUSY
+      → process_job() → /progress → status = 'running'
+      → generate() ... [working]
+
+Thread C (from UPDATE channel):
+  └── provider BUSY → queued
+
+Thread C (dequeued after Thread A releases lock):
+  └── process_job() → DB status = 'running' → SKIP
+      (Thread A is still in generate() or has already set running)
+
+Result: Job stuck at status='running' if Thread A errors out after
+        Thread C already consumed its queue slot and skipped.
+```
+
+### Impact
+
+- Jobs from Picsart, Clipdrop, and any provider that calls `reset_job_to_pending()` could get stuck at `status='running'` indefinitely.
+- Three concurrent threads processing the same job: Thread A (intended handler), Thread B (queue from RETRY-DELAY), Thread C (spurious UPDATE channel thread).
+- Observed as: provider queue filling up with duplicate entries of the same job ID, all skipping with `[SKIP] status is 'running'`.
+
+### Fix
+
+**1. Removed the UPDATE channel entirely** — all retry paths are already covered by dedicated handlers:
+
+| Error type | Handler |
+|---|---|
+| Non-key transient (network, timeout, Cloudinary) | `_deferred_retry` thread in `reset_job_to_pending()` — 30s delay |
+| Key-related error | `handle_api_key_insertion()` — fires when a new key is inserted |
+| Quota / stuck pending | `retry_transient_errors()` — 10-minute periodic sweep |
+| Worker restart | `reset_running_jobs_to_pending()` + `process_all_pending_jobs()` on startup |
+
+```python
+# AFTER (fixed) — UPDATE channel subscription removed
+# NOTE: We intentionally do NOT subscribe to UPDATE events here.
+# Jobs reset to 'pending' after a transient error are handled by two dedicated paths:
+#   1. _deferred_retry thread (spawned by reset_job_to_pending for non-key errors) — 30s delay
+#   2. handle_api_key_insertion (for key-related errors, fires when a new key is inserted)
+# Subscribing to UPDATE events caused a race condition where a third thread was spawned
+# for the same job, racing with the above two dedicated handlers and causing the job to
+# get stuck in 'running' state (all subsequent threads see status='running' and skip).
+```
+
+**2. Added status re-fetch guard in `handle_api_key_insertion()`** before spawning threads for pending jobs, preventing the case where the job was picked up by another thread between the initial DB fetch and the spawn:
+
+```python
+# AFTER — inside handle_api_key_insertion() image/video loop
+_status_check = _sb_check.table("jobs").select("status").eq("job_id", job_id).single().execute()
+if _status_check.data:
+    _current = _status_check.data.get("status")
+    if _current not in ("pending",):
+        print(f"Job {job_id} status is '{_current}' — already being processed, skipping")
+        continue
+```
+
+### Safety — All Job Types Verified
+
+| Job type | Affected by removed UPDATE channel? | Still covered? |
+|---|---|---|
+| **Image** | Yes — UPDATE channel was the race source | `_deferred_retry` + `handle_api_key_insertion` + 10-min sweep ✓ |
+| **Video** | Yes — same code path as image | Same as image ✓ |
+| **Workflow** | No — inner guard at line 2027 already skipped UPDATE events for workflows | `workflow_retry_manager` 2-min sweep + `handle_api_key_insertion` ✓ |
