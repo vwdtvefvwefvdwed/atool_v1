@@ -305,6 +305,10 @@ def map_model_to_provider(model_name: str, job_type: str = "image") -> Optional[
             "grok-text-to-video-2",
             "grok-image-to-video-2",
         ],
+        "cinematic-deapi": [
+            "ltx2-19b-dist-fp8-deapi",
+            "ltx2-3-22b-dist-int8-deapi",
+        ],
     }
     
     providers = video_providers if job_type == "video" else image_providers

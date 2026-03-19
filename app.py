@@ -32,10 +32,7 @@ from monetag_postback_manager import (
     get_recent_postbacks, clear_postback_cache, get_postback_url_config,
     format_postback_log
 )
-from provider_trials import (
-    get_user_provider_trials, check_provider_trial_available,
-    use_provider_trial, get_provider_by_model
-)
+
 from error_notifier import notify_error, ErrorType
 from model_quota_manager import ensure_quota_manager_started, get_quota_manager
 from slider_captcha import get_captcha_manager
@@ -561,54 +558,6 @@ def auth_logout():
             "success": False,
             "error": "No token provided"
         }), 400
-
-
-# ============================================
-# PROVIDER TRIALS ENDPOINTS
-# ============================================
-
-@app.route("/providers/trials", methods=["GET"])
-@require_auth
-def get_provider_trials():
-    """
-    Get all providers with user's trial availability status.
-    Called on first visit - frontend caches this locally.
-    """
-    user_context = get_current_user()
-    
-    if not user_context or not user_context.get("success"):
-        return jsonify({
-            "success": False,
-            "error": "Not authenticated"
-        }), 401
-    
-    result = get_user_provider_trials(user_context["user_id"])
-    
-    if result["success"]:
-        return jsonify(result), 200
-    else:
-        return jsonify(result), 500
-
-
-@app.route("/providers/check/<provider_key>", methods=["GET"])
-@require_auth
-def check_provider_trial(provider_key):
-    """Check if user has free trial available for a specific provider."""
-    user_context = get_current_user()
-    
-    if not user_context or not user_context.get("success"):
-        return jsonify({
-            "success": False,
-            "error": "Not authenticated"
-        }), 401
-    
-    available = check_provider_trial_available(user_context["user_id"], provider_key)
-    
-    return jsonify({
-        "success": True,
-        "provider_key": provider_key,
-        "free_trial_available": available
-    }), 200
 
 
 # ============================================
@@ -1497,27 +1446,7 @@ def worker_complete_job(job_id):
         video_url=video_url
     )
 
-    provider_update = None
     if result.get("success"):
-        try:
-            job_response = supabase.table("jobs").select("user_id, model").eq("job_id", job_id).execute()
-            if job_response.data:
-                job_data = job_response.data[0]
-                user_id = job_data["user_id"]
-                model = job_data.get("model", "")
-                
-                provider_key = get_provider_by_model(model)
-                if provider_key:
-                    trial_result = use_provider_trial(user_id, provider_key, job_id)
-                    if trial_result.get("success"):
-                        provider_update = {
-                            "provider_key": provider_key,
-                            "free_trial_available": False
-                        }
-                        print(f"✅ Marked provider trial used: {provider_key} for user {user_id}")
-        except Exception as e:
-            print(f"⚠️ Error updating provider trial: {e}")
-        
         try:
             meta_resp = supabase.table("jobs").select("metadata").eq("job_id", job_id).execute()
             if meta_resp.data:
@@ -1555,10 +1484,7 @@ def worker_complete_job(job_id):
             print(f"⚠️ Error dispatching SSE event: {sse_error}")
 
     if result.get("success"):
-        response = {"success": True}
-        if provider_update:
-            response["provider_update"] = provider_update
-        return jsonify(response), 200
+        return jsonify({"success": True}), 200
     else:
         return jsonify({"success": False, "error": "Failed to complete job"}), 500
 
@@ -1614,7 +1540,8 @@ def worker_reset_job(job_id):
     provider_key = data.get("provider_key")
     
     try:
-        if provider_key:
+        _skip_providers = {"unknown", "vision-nova", "cinematic-nova"}
+        if provider_key and provider_key not in _skip_providers:
             job_response = supabase.table("jobs").select("metadata").eq("job_id", job_id).execute()
             
             if job_response.data:

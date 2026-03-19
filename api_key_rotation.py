@@ -23,6 +23,7 @@ PROVIDER_KEY_MAPPING = {
     "vision-xeven": "xeven",
     "vision-infip": "infip",
     "vision-deapi": "deapi",
+    "cinematic-deapi": "deapi",
     "vision-leonardo": "leonardo",
     "vision-stabilityai": "stabilityai",
     "vision-picsart": "picsart",

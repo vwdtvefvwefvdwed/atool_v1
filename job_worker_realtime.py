@@ -441,9 +441,10 @@ def reset_job_to_pending(job_id, provider_key, error_message):
     print(f"[RESET] Marking job {job_id} as pending...")
     
     try:
+        _store_provider = provider_key if provider_key not in (None, "unknown", "vision-nova", "cinematic-nova") else None
         payload = {
             "message": error_message or "Unknown error",
-            "provider_key": provider_key or "unknown"
+            "provider_key": _store_provider or "unknown"
         }
         
         response = requests.post(
@@ -972,11 +973,15 @@ def process_job(job):
     model = job.get("model", "")
     
     metadata = job.get("metadata", {})
-    provider_key = metadata.get("provider_key") or job.get("provider_key")
-    
-    if not provider_key:
-        provider_key = map_model_to_provider(model, job_type=job_type)
-    
+    _meta_provider = metadata.get("provider_key") or job.get("provider_key")
+
+    _default_providers = {"vision-nova", "cinematic-nova"}
+    _model_provider = map_model_to_provider(model, job_type=job_type) if model else None
+    if _model_provider and _model_provider not in _default_providers:
+        provider_key = _model_provider
+    else:
+        provider_key = _meta_provider or _model_provider
+
     quota_manager = get_quota_manager()
     if not quota_manager.check_quota_available(provider_key, model):
         error_msg = f"QUOTA_EXCEEDED:{provider_key}:{model}"
@@ -994,11 +999,6 @@ def process_job(job):
     print(f"{'='*60}")
     print(f"Job ID: {job_id}")
     
-    metadata = job.get("metadata", {})
-    provider_key = metadata.get("provider_key") or job.get("provider_key")
-    if not provider_key and model:
-        provider_key = map_model_to_provider(model, job_type=job_type)
-
     endpoint_type = get_endpoint_type(provider_key, model)
     print(f"Provider: {provider_key}")
     print(f"Endpoint: {endpoint_type.upper()}")
@@ -1039,7 +1039,7 @@ def process_video_job(job):
         input_image_url = metadata.get("input_image_url") or metadata.get("video_url")
         mask_url = metadata.get("mask_url")
         duration = metadata.get("duration", 5)
-        provider_key = metadata.get("provider_key") or job.get("provider_key")
+        _meta_provider_v = metadata.get("provider_key") or job.get("provider_key")
         
         job_model = job.get("model", "minimax/video-01")
         
@@ -1055,9 +1055,13 @@ def process_video_job(job):
             mark_job_failed(job_id, "⚠️ This tool requires an input video. Please upload a video and try again.")
             return
         
-        if not provider_key:
-            provider_key = map_model_to_provider(job_model, job_type="video")
-            print(f"Determined provider from model: {provider_key}")
+        _default_providers = {"vision-nova", "cinematic-nova"}
+        _model_provider_v = map_model_to_provider(job_model, job_type="video")
+        if _model_provider_v and _model_provider_v not in _default_providers:
+            provider_key = _model_provider_v
+        else:
+            provider_key = _meta_provider_v or _model_provider_v
+        print(f"Determined provider from model: {provider_key}")
         
         # vision-xeven is a FREE API that doesn't require an API key (image only)
         if provider_key == "vision-xeven":
@@ -1384,17 +1388,21 @@ def process_image_job(job):
         metadata = job.get("metadata", {}) or {}
         input_image_url = metadata.get("input_image_url") or job.get("image_url")
         mask_url = metadata.get("mask_url")
-        provider_key = metadata.get("provider_key") or job.get("provider_key")
-        
+        _meta_provider_i = metadata.get("provider_key") or job.get("provider_key")
+
+        _default_providers = {"vision-nova", "cinematic-nova"}
+        _model_provider_i = map_model_to_provider(model_name, job_type="image")
+        if _model_provider_i and _model_provider_i not in _default_providers:
+            provider_key = _model_provider_i
+        else:
+            provider_key = _meta_provider_i or _model_provider_i
+        print(f"Determined provider from model: {provider_key}")
+
         if model_name in MODELS_REQUIRING_INPUT_IMAGE and not input_image_url:
             print(f"[MISSING INPUT IMAGE] Model {model_name} requires an input image but none was provided")
             print(f"[MISSING INPUT IMAGE] Marking job {job_id} as FAILED")
             mark_job_failed(job_id, "⚠️ This tool requires an input image. Please upload a reference image and try again.")
             return
-        
-        if not provider_key:
-            provider_key = map_model_to_provider(model_name, job_type="image")
-            print(f"Determined provider from model: {provider_key}")
         
         # vision-xeven is a FREE API that doesn't require an API key
         if provider_key == "vision-xeven":

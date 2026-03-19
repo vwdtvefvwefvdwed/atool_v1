@@ -10,7 +10,7 @@ Routes generation requests to different API providers based on provider key:
 - vision-removebg → Remove.bg API
 - vision-bria → Bria AI Vision (Image generation and editing)
 - vision-infip → Infip.pro API (Async polling-based)
-- vision-deapi → deAPI (Async polling-based)
+- vision-deapi, cinematic-deapi → deAPI (Async polling-based)
 - vision-leonardo, cinematic-leonardo → Leonardo AI (Async polling-based)
 - vision-stabilityai → Stability AI (Image upscaling)
 - vision-picsart → Picsart API (Ultra upscaling)
@@ -232,6 +232,8 @@ INFIP_MODELS = {
 DEAPI_MODELS = {
     'z-image-turbo-deapi': 'ZImageTurbo_INT8',  # Fast photorealistic model (INT8 quantized)
     'flux-schnell-deapi': 'Flux1schnell',  # Fast iteration model (20 steps)
+    'ltx2-19b-dist-fp8-deapi': 'Ltx2_19B_Dist_FP8',  # LTX-2 19B Distilled FP8 (img2video)
+    'ltx2-3-22b-dist-int8-deapi': 'Ltx2_3_22B_Dist_INT8',  # LTX-2.3 22B Distilled INT8 (txt2video)
 }
 
 # Leonardo AI Models - https://cloud.leonardo.ai/api/rest/v1 & v2
@@ -385,6 +387,7 @@ PROVIDER_ROUTING = {
     'vision-xeven': 'xeven',
     'vision-infip': 'infip',
     'vision-deapi': 'deapi',
+    'cinematic-deapi': 'deapi',
     'vision-leonardo': 'leonardo',
     'vision-stabilityai': 'stabilityai',
     'cinematic-nova': 'replicate',
@@ -414,6 +417,7 @@ PROVIDER_ALLOWED_IMAGE_FORMATS = {
     'vision-pixazo':        [],
     'vision-infip':         [],
     'vision-deapi':         [],
+    'cinematic-deapi':      ['jpg', 'jpeg', 'png', 'webp'],
     'cinematic-nova':       ['jpg', 'jpeg', 'png', 'webp', 'gif'],
     'cinematic-pro':        ['jpg', 'jpeg', 'png', 'webp'],
     'cinematic-bria':       ['mp4', 'webm', 'mov'],
@@ -1494,32 +1498,153 @@ def generate_with_infip(prompt, model, aspect_ratio, api_key, input_image_url=No
 
 def generate_with_deapi(prompt, model, aspect_ratio, api_key, input_image_url=None, job_type="image", duration=5):
     """
-    Generate images using deAPI (https://api.deapi.ai)
-    https://api.deapi.ai/api/v1/client/txt2img
-    
-    Supports 2 models (all require async polling):
-    - ZImageTurbo_INT8: Fast photorealistic model (20 steps)
-    - Flux1schnell: Fast iteration model (20 steps)
-    
+    Generate images or videos using deAPI (https://api.deapi.ai)
+    Image:  https://api.deapi.ai/api/v1/client/txt2img
+    Video:  https://api.deapi.ai/api/v1/client/txt2video  (text-to-video)
+            https://api.deapi.ai/api/v1/client/img2video  (image-to-video, multipart)
+
+    Supports models (all require async polling):
+    - ZImageTurbo_INT8: Fast photorealistic image model (INT8 quantized)
+    - Flux1schnell: Fast iteration image model
+    - Ltx2_19B_Dist_FP8: LTX-2 19B Distilled FP8 video model (txt2video / img2video)
+
     Workflow:
-    1. POST /api/v1/client/txt2img → returns request_id
+    1. POST endpoint → returns request_id
     2. Poll GET /api/v1/client/request-status/{request_id}
     3. Extract result_url when status = "done"
-    
-    IMAGE INPUT: NOT SUPPORTED - deAPI txt2img endpoint is text-to-image only.
-    deAPI has a separate img2img endpoint but it is not currently integrated.
     """
     deapi_model = DEAPI_MODELS.get(model, model)
     base_url = "https://api.deapi.ai/api/v1/client"
-    
-    print(f"[deAPI] Running model: {deapi_model}")
+
+    print(f"[deAPI] Running model: {deapi_model}, job_type: {job_type}")
     print(f"[deAPI] Aspect ratio: {aspect_ratio}")
-    
+
+    headers_json = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    headers_auth = {
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "application/json",
+    }
+
+    # ── VIDEO GENERATION (cinematic-deapi) ──────────────────────────────────
+    if job_type == "video":
+        video_aspect_map = {
+            "1:1":  (768, 768),
+            "16:9": (1024, 576),
+            "9:16": (576, 1024),
+            "4:3":  (1024, 768),
+            "3:4":  (768, 1024),
+            "3:2":  (1024, 682),
+            "2:3":  (682, 1024),
+        }
+        width, height = video_aspect_map.get(aspect_ratio, (768, 768))
+
+        effective_duration = max(duration, 8) if duration else 8
+        frames = min(int(effective_duration * 24), 240)
+        fps = 24
+        guidance = 7.5
+        seed = -1
+
+        if input_image_url:
+            steps = 20
+            print(f"[deAPI] Video: image-to-video mode. Downloading input image: {input_image_url}")
+            img_response = requests.get(input_image_url, timeout=30)
+            if img_response.status_code != 200:
+                raise Exception(f"[deAPI] Failed to download input image: {img_response.status_code}")
+
+            form_data = {
+                "prompt": prompt,
+                "model": deapi_model,
+                "width": str(width),
+                "height": str(height),
+                "guidance": str(guidance),
+                "steps": str(steps),
+                "frames": str(frames),
+                "fps": str(fps),
+                "seed": str(seed),
+            }
+            files = {"first_frame_image": ("frame.jpg", img_response.content, "image/jpeg")}
+
+            print(f"[deAPI] img2video request: model={deapi_model}, size={width}x{height}, frames={frames}")
+            response = requests.post(
+                f"{base_url}/img2video",
+                headers=headers_auth,
+                data=form_data,
+                files=files,
+                timeout=60,
+            )
+        else:
+            steps = 8
+            payload = {
+                "prompt": prompt,
+                "model": deapi_model,
+                "width": width,
+                "height": height,
+                "guidance": guidance,
+                "steps": steps,
+                "frames": frames,
+                "fps": fps,
+                "seed": seed,
+            }
+            print(f"[deAPI] txt2video request: model={deapi_model}, size={width}x{height}, frames={frames}")
+            response = requests.post(
+                f"{base_url}/txt2video",
+                headers=headers_json,
+                json=payload,
+                timeout=60,
+            )
+
+        print(f"[deAPI] Video response status: {response.status_code}")
+        if response.status_code != 200:
+            raise Exception(f"deAPI video error {response.status_code}: {response.text}")
+
+        result = response.json()
+        print(f"[deAPI] Video response: {result}")
+
+        if not ("data" in result and "request_id" in result["data"]):
+            raise Exception(f"deAPI video response missing request_id. Response: {result}")
+
+        request_id = result["data"]["request_id"]
+        print(f"[deAPI] Video request submitted - polling for request: {request_id}")
+
+        max_attempts = 90
+        poll_interval = 5
+
+        for attempt in range(max_attempts):
+            time.sleep(poll_interval)
+            poll_response = requests.get(
+                f"{base_url}/request-status/{request_id}",
+                headers=headers_auth,
+                timeout=30,
+            )
+            if poll_response.status_code != 200:
+                raise Exception(f"deAPI video polling error {poll_response.status_code}: {poll_response.text}")
+
+            poll_result = poll_response.json()
+            status = poll_result.get("data", {}).get("status")
+            print(f"[deAPI] Video poll {attempt + 1}/{max_attempts}: status={status}")
+
+            if status == "done":
+                result_url = poll_result["data"].get("result_url") or poll_result["data"].get("result")
+                if result_url:
+                    print(f"[deAPI] Video completed! URL: {result_url}")
+                    return {"success": True, "url": result_url, "type": "video"}
+                raise Exception(f"deAPI video completed but no URL found. Response: {poll_result}")
+
+            elif status == "error":
+                error_msg = poll_result["data"].get("error", "Unknown error")
+                raise Exception(f"deAPI video request failed: {error_msg}")
+
+        raise Exception(f"deAPI video request {request_id} timed out after {max_attempts * poll_interval} seconds")
+
+    # ── IMAGE GENERATION (vision-deapi) ─────────────────────────────────────
     if input_image_url:
         print(f"[deAPI] WARNING: Image input is not supported by deAPI txt2img models. Input image will be ignored.")
         raise Exception("IMAGE_NOT_SUPPORTED: deAPI models (ZImageTurbo_INT8, Flux1schnell) do not support image input via the current txt2img endpoint. These are text-to-image models only. Please use a different endpoint for image-to-image tasks.")
-    
-    # Map aspect ratios to width/height
+
     aspect_map = {
         "1:1": (1024, 1024),
         "16:9": (1344, 768),
@@ -1529,14 +1654,12 @@ def generate_with_deapi(prompt, model, aspect_ratio, api_key, input_image_url=No
         "3:2": (1152, 768),
         "2:3": (768, 1152),
     }
-    
+
     width, height = aspect_map.get(aspect_ratio, (1024, 1024))
-    
-    # Log if using non-standard ratio mapping
+
     if aspect_ratio not in aspect_map:
         print(f"[deAPI] Note: Using default size 1024x1024 for aspect ratio: {aspect_ratio}")
-    
-    # Model-specific settings
+
     if deapi_model == "ZImageTurbo_INT8":
         guidance = 3.5
         steps = 20
@@ -1546,8 +1669,7 @@ def generate_with_deapi(prompt, model, aspect_ratio, api_key, input_image_url=No
     else:
         guidance = 7.5
         steps = 20
-    
-    # Prepare request payload
+
     payload = {
         "prompt": prompt,
         "model": deapi_model,
@@ -1555,94 +1677,79 @@ def generate_with_deapi(prompt, model, aspect_ratio, api_key, input_image_url=No
         "height": height,
         "guidance": guidance,
         "steps": steps,
-        "seed": -1  # Random seed
+        "seed": -1,
     }
-    
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-        "Accept": "application/json"
-    }
-    
+
     print(f"[deAPI] Request payload: {payload}")
-    
+
     try:
-        # Call deAPI txt2img endpoint
         response = requests.post(
             f"{base_url}/txt2img",
-            headers=headers,
+            headers=headers_json,
             json=payload,
-            timeout=30
+            timeout=30,
         )
-        
+
         print(f"[deAPI] Response status: {response.status_code}")
-        
+
         if response.status_code != 200:
             error_msg = f"deAPI error {response.status_code}: {response.text}"
             print(f"[deAPI] Error: {error_msg}")
             raise Exception(error_msg)
-        
+
         result = response.json()
         print(f"[deAPI] Response: {result}")
-        
-        # Extract request_id
+
         if "data" in result and "request_id" in result["data"]:
             request_id = result["data"]["request_id"]
             print(f"[deAPI] Request submitted - polling for request: {request_id}")
-            
-            # Poll for completion
-            max_attempts = 60  # 60 attempts * 2 seconds = 120 seconds max
-            poll_interval = 2  # seconds
-            
+
+            max_attempts = 60
+            poll_interval = 2
+
             for attempt in range(max_attempts):
                 time.sleep(poll_interval)
-                
+
                 poll_response = requests.get(
                     f"{base_url}/request-status/{request_id}",
-                    headers=headers,
-                    timeout=30
+                    headers=headers_json,
+                    timeout=30,
                 )
-                
+
                 if poll_response.status_code != 200:
                     error_msg = f"deAPI polling error {poll_response.status_code}: {poll_response.text}"
                     print(f"[deAPI] Error: {error_msg}")
                     raise Exception(error_msg)
-                
+
                 poll_result = poll_response.json()
-                
-                # Extract status from response
+
                 status = None
                 if "data" in poll_result:
                     status = poll_result["data"].get("status")
-                
+
                 print(f"[deAPI] Poll attempt {attempt + 1}/{max_attempts}: status = {status}")
-                
+
                 if status == "done":
-                    # Extract image URL from completed request
                     result_url = poll_result["data"].get("result_url")
                     result_data = poll_result["data"].get("result")
-                    
-                    # Try to get URL from either field
+
                     image_url = result_url or result_data
-                    
+
                     if image_url:
                         print(f"[deAPI] Request completed! Image URL: {image_url}")
                         return {"success": True, "url": image_url, "type": "image"}
-                    
+
                     raise Exception(f"deAPI request completed but no image URL found. Response: {poll_result}")
-                
+
                 elif status == "error":
                     error_msg = poll_result["data"].get("error", "Unknown error")
                     raise Exception(f"deAPI request failed: {error_msg}")
-                
-                # Status is still "pending" or "processing", continue polling
-            
-            # Timeout after max attempts
+
             raise Exception(f"deAPI request {request_id} timed out after {max_attempts * poll_interval} seconds")
-        
+
         else:
             raise Exception(f"deAPI response missing request_id. Response: {result}")
-        
+
     except requests.exceptions.Timeout:
         error_msg = "deAPI request timeout after 30 seconds"
         print(f"[deAPI] Error: {error_msg}")

@@ -37,5 +37,8 @@
   },
   "vision-deapi": {
     "current_row": 1
+  },
+  "cinematic-deapi": {
+    "current_row": 2
   }
 }
