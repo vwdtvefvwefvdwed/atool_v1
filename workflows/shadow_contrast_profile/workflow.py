@@ -57,8 +57,8 @@ class ShadowContrastProfileWorkflow(BaseWorkflow):
         logger.info("Starting Shadow Contrast Profile image edit step")
         endpoint_manager = get_endpoint_manager()
 
-        model = step_config.get('model', step_config.get('default_model', 'nano-banana-pro-leonardo'))
-        provider = step_config.get('provider', 'vision-leonardo')
+        model = step_config.get('model', step_config.get('default_model', 'gemini-25-flash-aicc'))
+        provider = step_config.get('provider', 'vision-aicc')
         prompt = self.config['default_prompts']['image_edit']
 
         logger.info(f"Using model: {model}, provider: {provider}")
@@ -75,8 +75,29 @@ class ShadowContrastProfileWorkflow(BaseWorkflow):
 
         result = await endpoint_manager.generate_image(**generation_params)
 
+        edited_url = result.get('image_url') or result.get('url')
+
+        if not edited_url and result.get('is_base64') and result.get('data'):
+            logger.info("img2img returned base64 — uploading to Cloudinary")
+            import base64 as _b64
+            from io import BytesIO
+            cloudinary = get_cloudinary_manager()
+            image_bytes = _b64.b64decode(result['data'])
+            upload_result = cloudinary.upload_image_from_bytes(
+                image_bytes,
+                "aicc_edited.jpg",
+                folder_name="workflow-edited"
+            )
+            if upload_result.get('success') is False:
+                raise HardError(f"Failed to upload base64 result to Cloudinary: {upload_result.get('error')}")
+            edited_url = upload_result.get('secure_url') or upload_result.get('url')
+            logger.info(f"Uploaded base64 result to Cloudinary: {edited_url}")
+
+        if not edited_url:
+            raise HardError("Image edit step returned no URL and no base64 data")
+
         return {
-            "edited_image_url": result.get('image_url') or result.get('url'),
+            "edited_image_url": edited_url,
             "model_used": model,
             "prompt": prompt,
             "original_image": input_data['image_url']

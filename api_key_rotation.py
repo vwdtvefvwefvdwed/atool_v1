@@ -29,6 +29,10 @@ PROVIDER_KEY_MAPPING = {
     "vision-picsart": "picsart",
     "vision-clipdrop": "clipdrop",
     "vision-frenix": "frenix",
+    "vision-aicc":    "aicc",
+    "cinematic-aicc": "aicc",
+    "vision-felo":    "felo",
+    "felo":           "felo",
     # cinematic-* video providers (from multi_endpoint_manager.py)
     "cinematic-nova": "replicate",
     "cinematic-pro": "kie",
@@ -64,6 +68,7 @@ PROVIDER_KEY_MAPPING = {
     "picsart": "picsart",
     "clipdrop": "clipdrop",
     "frenix": "frenix",
+    "aicc":   "aicc",
 }
 
 _COMMON_LIMIT_PATTERNS = [
@@ -119,7 +124,11 @@ _COMMON_ENTRY = {
 
 NO_API_KEY_PROVIDERS = {"xeven"}
 
-NO_DELETE_ROTATE_PROVIDERS = {"vision-infip", "vision-a4f", "vision-frenix"}
+NO_DELETE_ROTATE_PROVIDERS = {"vision-infip", "vision-a4f", "vision-frenix", "vision-aicc", "cinematic-aicc", "aicc", "vision-clipdrop", "vision-felo", "felo"}
+
+# Providers in NO_DELETE_ROTATE_PROVIDERS that SHOULD delete the key on credit_exceeded
+# (rate limit → rotate only; credit exhausted → delete + rotate)
+CREDIT_EXCEEDED_DELETE_PROVIDERS = {"vision-aicc", "cinematic-aicc", "aicc"}
 
 ERROR_PATTERNS = {
     "replicate": {
@@ -350,6 +359,41 @@ ERROR_PATTERNS = {
         ],
     },
     "frenix":         _COMMON_ENTRY,
+    # AICC: credit_exceeded uses a tightly curated set — only patterns that unambiguously
+    # mean "this key is dead/revoked/exhausted". Broad patterns like r"subscription",
+    # r"billing", r"expired" are intentionally excluded to avoid falsely deleting a key
+    # when AICC returns a rate-limit 400/503 that describes a plan/billing context.
+    # rate_limit (429 / "rate limit") is always caught by limit_reached FIRST.
+    "aicc": {
+        "limit_reached": _COMMON_LIMIT_PATTERNS,
+        "credit_exceeded": [
+            r"insufficient",
+            r"insufficient credit",
+            r"insufficient_credit",
+            r"insufficient balance",
+            r"not enough credit",
+            r"payment required",
+            r"payment_required",
+            r"invalid token",
+            r"invalid_token",
+            r"unauthorized",
+            r"invalid api key",
+            r"invalid_api_key",
+            r"api key invalid",
+            r"access denied",
+            r"forbidden",
+            r"401",
+            r"402",
+            r"403",
+            r"quota_not_enough",
+            r"quota not enough",
+            r"user quota is not enough",
+            r"insufficient_user_quota",
+            r"insufficient user quota",
+            r"用户额度不足",
+        ],
+    },
+    "felo":           _COMMON_ENTRY,
     "huggingface":    _COMMON_ENTRY,
     "openai":         _COMMON_ENTRY,
     "fal":            _COMMON_ENTRY,
@@ -376,7 +420,21 @@ def detect_error_type(error_message: str, provider: str) -> Optional[str]:
         return None
     
     error_msg_lower = str(error_message).lower()
-    
+
+    # Network/DNS failures must never be classified as credit/key errors.
+    # urllib3 "Max retries exceeded" and DNS resolution failures are pure
+    # infrastructure errors — not signs of an exhausted or invalid API key.
+    _NETWORK_INDICATORS = [
+        "getaddrinfo failed",
+        "nameresolutionerror",
+        "name or service not known",
+        "failed to resolve",
+        "nodename nor servname",
+        "eof occurred in violation",
+    ]
+    if any(x in error_msg_lower for x in _NETWORK_INDICATORS):
+        return "network_error"
+
     actual_provider = PROVIDER_KEY_MAPPING.get(provider.lower(), provider.lower())
     provider_patterns = ERROR_PATTERNS.get(actual_provider, {})
     
@@ -418,7 +476,11 @@ def should_rotate_key(error_message: str, provider: str) -> bool:
                 "timeout", "timed out", "connection", "network", "unreachable",
                 "httpsconnectionpool", "unable to connect"
             ])
-            if not is_network:
+            is_model_not_found = any(x in error_msg_lower for x in [
+                "model_not_found", "is not found for api version", "not supported for generatecontent",
+                "call listmodels", "model not found", "no such model",
+            ])
+            if not is_network and not is_model_not_found:
                 return True
     
     return False
@@ -492,15 +554,13 @@ def handle_api_key_rotation(
 def handle_roundrobin_rotation(
     provider_key: str,
     error_message: str,
-    job_id: str
+    job_id: str,
+    current_api_key_id: Optional[int] = None,
 ) -> Tuple[bool, Optional[Dict[str, Any]]]:
     """
-    Rotate to the next API key WITHOUT deleting the current one.
-    Used for providers in NO_DELETE_ROTATE_PROVIDERS.
-
-    Unlike handle_api_key_rotation(), this never deletes a key.
-    It simply advances the round-robin pointer and returns the next key.
-    Cycle counting and failure decisions are handled by the caller (job worker).
+    Rotate to the next API key, deleting the current one only on credit_exceeded
+    for providers in CREDIT_EXCEEDED_DELETE_PROVIDERS. For all other error types
+    (rate limit, quota) the key is kept and rotation is round-robin only.
 
     Returns:
         Tuple of (success, next_api_key_data)
@@ -520,10 +580,29 @@ def handle_roundrobin_rotation(
         print(f"[RR-ROTATION] Error type '{error_type}' does not require rotation")
         return False, None
 
+    # For providers that allow deletion on credit_exceeded, delete the key first
+    if error_type == "credit_exceeded" and provider_key in CREDIT_EXCEEDED_DELETE_PROVIDERS:
+        if current_api_key_id is None:
+            print(f"[RR-ROTATION] Credit exceeded but key ID is None — skipping deletion for '{provider_key}'")
+        else:
+            print(f"[RR-ROTATION] Credit exceeded — deleting key {current_api_key_id} for provider '{provider_key}'")
+            enriched_error = (
+                f"[Job: {job_id}] "
+                f"[Provider: {provider_key}] "
+                f"[Error Type: {error_type}] "
+                f"{error_message}"
+            )
+            deleted = delete_api_key(current_api_key_id, enriched_error)
+            if not deleted:
+                print(f"[RR-ROTATION] Failed to delete key {current_api_key_id}")
+            else:
+                print(f"[RR-ROTATION] Key {current_api_key_id} deleted (credit exhausted)")
+
     next_key = get_next_api_key_for_provider(provider_key)
 
     if next_key:
-        print(f"[RR-ROTATION] Got next key (key #{next_key.get('key_number', '?')}) - key NOT deleted")
+        deleted_note = "key deleted" if (error_type == "credit_exceeded" and provider_key in CREDIT_EXCEEDED_DELETE_PROVIDERS) else "key NOT deleted"
+        print(f"[RR-ROTATION] Got next key (key #{next_key.get('key_number', '?')}) - {deleted_note}")
         return True, next_key
 
     print(f"[RR-ROTATION] No keys available for provider '{provider_key}'")

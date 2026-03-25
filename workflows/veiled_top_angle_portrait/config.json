@@ -8,12 +8,12 @@
   "preview_thumbnail": null,
   "enabled": true,
   "default_prompts": {
-    "image_edit": "Use Image A as a high-fidelity facial reference (not strict identity lock). Create a true photorealistic black-and-white close-up portrait from a high top-down angle, tight head-and-shoulders framing. She wears a modest high-neck dress fully covering the neckline. Thick loose hair falls over one side of the face, hiding one eye with small natural gaps. The hand must be on the SAME side as the hair-covered eye, positioned in front of the face, fingers gently guiding and holding the hair across that side — naturally assisting the partial cover. The hand aligns with the hidden side, integrated into the hair movement, not crossing from the opposite side. Strong asymmetry, layered foreground hair depth. Soft relaxed smile. Shallow depth of field, sharp focus on the visible eye and lips, smooth background falloff. Preserve accurate proportions, realistic skin texture, soft diffused top lighting, film-grade monochrome, 85mm portrait look, ultra-detailed, no stylization, no plastic skin, no AI artifacts, clean natural skin on hands, no tattoos, no henna, no markings.",
+    "image_edit": "Image A = identity source. Task: Generate a true photorealistic black-and-white close-up portrait using the EXACT face from Image A. ABSOLUTE FACE LOCK (NON-NEGOTIABLE): Build the face directly from Image A with no modification. Preserve exact face shape, jawline, cheekbones, forehead, chin. Preserve exact eyes, nose, lips, spacing, and proportions. Preserve exact skin structure, natural asymmetry, and micro-details. Preserve exact hairstyle, hairline, density, and texture (adapt only for pose, not redesign). Maintain identity 1:1 — must be clearly the same person. DO NOT: redesign, beautify, stylize, or reinterpret the face, change proportions or symmetry, generate a new or blended face. If any conflict occurs, IGNORE all other instructions and keep Image A face unchanged. COMPOSITION: High top-down angle, tight head-and-shoulders framing. HAIR & HAND INTERACTION (STRICT): Thick loose hair falls over ONE side of the face, fully covering one eye. The hand must be on the SAME side as the covered eye. Fingers gently guide and hold the hair across that side. Hand must integrate naturally with hair flow, not cross from the opposite side. Maintain strong asymmetry and layered foreground depth. EXPRESSION: Soft relaxed smile. FOCUS & DEPTH: Shallow depth of field, sharp focus on the visible eye and lips, smooth background falloff. CLOTHING: Modest high-neck dress fully covering the neckline. LIGHTING: Soft diffused top lighting with natural shadow falloff. PHOTOREALISM: Real skin texture, pores, and natural imperfections, clean natural skin on hands (no tattoos, no henna, no markings), realistic hair strands and depth layering. LENS & FINISH: 85mm portrait look, film-grade monochrome, ultra-detailed, high dynamic range, sharp eye focus. STRICT OUTPUT RULE: This is a face-preservation task, NOT a face-generation task. The final image must clearly match Image A identity without alteration. NO stylization, NO plastic skin, NO AI artifacts.",
     "upscale": "Ultra high-resolution black-and-white top-angle portrait, selective focus on visible eye and lips, fine hair strand detail, film-grade monochrome, 8K, HDR"
   },
   "supported_models": {
     "image_edit": [
-      "nano-banana-pro-leonardo"
+      "gemini-25-flash-aicc"
     ],
     "upscale": [
       "clipdrop-upscale"
@@ -33,8 +33,8 @@
       "type": "generation",
       "description": "AI-powered veiled top-angle portrait transformation",
       "model_type": "image",
-      "default_model": "nano-banana-pro-leonardo",
-      "provider": "vision-leonardo"
+      "default_model": "gemini-25-flash-aicc",
+      "provider": "vision-aicc"
     },
     {
       "id": 2,

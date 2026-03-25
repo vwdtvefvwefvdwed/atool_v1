@@ -271,10 +271,17 @@ def map_model_to_provider(model_name: str, job_type: str = "image") -> Optional[
         ],
         "vision-clipdrop": [
             "clipdrop-upscale",
+            "clipdrop-expand",
         ],
         "vision-frenix": [
             "frenix-dirtberry",
             "frenix-flux-2-pro",
+        ],
+        "vision-aicc": [
+            "gemini-25-flash-aicc",
+        ],
+        "vision-felo": [
+            "nano-banana-2",
         ],
     }
     
@@ -308,6 +315,9 @@ def map_model_to_provider(model_name: str, job_type: str = "image") -> Optional[
         "cinematic-deapi": [
             "ltx2-19b-dist-fp8-deapi",
             "ltx2-3-22b-dist-int8-deapi",
+        ],
+        "cinematic-aicc": [
+            "wan22-i2v-plus-aicc",
         ],
     }
     

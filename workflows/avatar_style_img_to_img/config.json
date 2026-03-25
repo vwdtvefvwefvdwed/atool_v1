@@ -7,14 +7,13 @@
   "preview_video": null,
   "preview_thumbnail": null,
   "enabled": true,
-  "avatar_image_url": "https://res.cloudinary.com/dnagl4r2t/image/upload/v1771751129/avatar002_xvbg7s.png",
   "default_prompts": {
-    "image_edit": "Use Image B as an immutable base (no deviation) with full composition, camera, pose, anatomy, scale, and framing lock; perform only a precise face swap on the background male warrior using Image A as identity reference; output must be identical to Image B except facial identity (no new subjects, no scene changes); match Image A facial structure, eyes, and proportions while keeping original head size, position, and alignment exactly unchanged (no scaling or shift); preserve Image B braided hair exactly; match the same expression, gaze, and intensity; convert face to Na'vi using exact neck/torso color sampling with identical blue tone, subsurface glow, and bioluminescence; apply identical red Ash Clan war paint with seamless face–neck blending under same lighting; strictly forbid any change to foreground woman, creature, pose, costume, environment, depth, lighting, or camera; no reinterpretation, no additions, photorealistic cinematic output only.",
+    "image_edit": "Image A = identity source\n\nTask: Create a photorealistic cinematic scene of a Na'vi-style male warrior interacting with a large orange dragon, while strictly preserving the identity from Image A.\n\nABSOLUTE PRIORITY — FACE STRUCTURE LOCK:\n- Use Image A as the ONLY source for facial structure\n- Preserve exact face shape, jawline, cheekbones, nose, lips, eye shape, spacing, and proportions\n- Preserve beard, mustache, hairline, and natural asymmetry\n- The character must clearly look like the SAME PERSON\n\nIMPORTANT:\n- Do NOT paste or overlay the face\n- Fully re-render the face to match lighting and body\n- Do NOT change proportions or identity under any condition\n\nIf conflict occurs, KEEP the face from Image A and ignore other changes.\n\nNA'VI TRANSFORMATION (CONTROLLED):\n- Apply Na'vi-style blue skin tone uniformly across face, neck, and body\n- Keep facial geometry identical (no elongation, no distortion)\n- Add subtle Na'vi features only (ears, tone), without altering identity\n- Ensure smooth color blending (no mismatch, no seams)\n\nSCENE (CINEMATIC BUT CONTROLLED):\n- Medium shot (waist-up or slightly wider)\n- Character standing beside a dragon\n- One hand naturally touching the dragon's head or neck\n- Balanced composition with space around subject\n\nDRAGON (REALISM — VERY IMPORTANT):\n- Realistic biological creature, NOT fantasy cartoon\n- Inspired by real reptiles (Komodo dragon, crocodile) + bat-like wings\n- Rough detailed scales, natural imperfections, believable anatomy\n- Strong muscular structure, grounded in real-world physics\n- Natural orange coloration (not glowing cartoon style)\n\nSTYLE (FORCE REALISM):\n- Live-action movie still (NOT CGI, NOT 3D render, NOT illustration)\n- Realistic skin texture (pores, imperfections)\n- Natural lighting behavior, no artificial glow effects\n- No oversaturation, no stylization\n\nLIGHTING:\n- Physically accurate cinematic lighting\n- Warm light from dragon subtly affecting character\n- Consistent shadows across face and body\n\nBACKGROUND:\n- Soft, slightly blurred forest or natural environment\n- Minimal distractions, no extra animals or clutter\n\nQUALITY:\n- ultra high resolution\n- sharp focus on subject\n- HDR realism\n\nFINAL RULE:\nThis is a photorealistic identity-preservation scene.\nThe face must match Image A exactly in structure, fully integrated into the Na'vi body, with no cartoon or artificial rendering.",
     "upscale": "Ultra high-resolution photorealistic avatar dragon rider with fused facial likeness, sharp focus, cinematic quality, 8K, HDR"
   },
   "supported_models": {
     "image_edit": [
-      "nano-banana-pro-leonardo"
+      "gemini-25-flash-aicc"
     ],
     "upscale": [
       "clipdrop-upscale"
@@ -34,8 +33,8 @@
       "type": "generation",
       "description": "AI-powered avatar face fusion transformation",
       "model_type": "image",
-      "default_model": "nano-banana-pro-leonardo",
-      "provider": "vision-leonardo"
+      "default_model": "gemini-25-flash-aicc",
+      "provider": "vision-aicc"
     },
     {
       "id": 2,

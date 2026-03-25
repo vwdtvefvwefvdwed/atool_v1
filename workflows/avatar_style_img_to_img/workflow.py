@@ -7,9 +7,6 @@ from workflows import notify_error, ErrorType
 
 logger = logging.getLogger(__name__)
 
-AVATAR_IMAGE_URL = "https://res.cloudinary.com/dnagl4r2t/image/upload/v1771751129/avatar002_xvbg7s.png"
-
-
 class AvatarStyleImgToImgWorkflow(BaseWorkflow):
     async def step_upload(self, input_file: Any, step_config: Dict) -> Dict[str, Any]:
         try:
@@ -60,36 +57,53 @@ class AvatarStyleImgToImgWorkflow(BaseWorkflow):
         logger.info("Starting Avatar style image edit step")
         endpoint_manager = get_endpoint_manager()
 
-        model = step_config.get('model', step_config.get('default_model', 'nano-banana-pro-leonardo'))
-        provider = step_config.get('provider', 'vision-leonardo')
+        model = step_config.get('model', step_config.get('default_model', 'gemini-25-flash-aicc'))
+        provider = step_config.get('provider', 'vision-aicc')
         prompt = self.config['default_prompts']['image_edit']
-
-        avatar_image_url = self.config.get('avatar_image_url', AVATAR_IMAGE_URL)
 
         user_face_url = input_data['image_url']
 
         logger.info(f"Using model: {model}, provider: {provider}")
         logger.info(f"Image A (user face): {user_face_url}")
-        logger.info(f"Image B (avatar): {avatar_image_url}")
         logger.info(f"Prompt: {prompt[:100]}...")
 
         generation_params = {
             'prompt': prompt,
             'model': model,
             'provider_key': provider,
-            'input_image_url': [user_face_url, avatar_image_url],
+            'input_image_url': user_face_url,
             'aspect_ratio': '1:1',
             'job_id': self.job_id
         }
 
         result = await endpoint_manager.generate_image(**generation_params)
 
+        edited_url = result.get('image_url') or result.get('url')
+
+        if not edited_url and result.get('is_base64') and result.get('data'):
+            logger.info("img2img returned base64 — uploading to Cloudinary")
+            import base64 as _b64
+            from io import BytesIO
+            cloudinary = get_cloudinary_manager()
+            image_bytes = _b64.b64decode(result['data'])
+            upload_result = cloudinary.upload_image_from_bytes(
+                image_bytes,
+                "aicc_edited.jpg",
+                folder_name="workflow-edited"
+            )
+            if upload_result.get('success') is False:
+                raise HardError(f"Failed to upload base64 result to Cloudinary: {upload_result.get('error')}")
+            edited_url = upload_result.get('secure_url') or upload_result.get('url')
+            logger.info(f"Uploaded base64 result to Cloudinary: {edited_url}")
+
+        if not edited_url:
+            raise HardError("Image edit step returned no URL and no base64 data")
+
         return {
-            "edited_image_url": result.get('image_url') or result.get('url'),
+            "edited_image_url": edited_url,
             "model_used": model,
             "prompt": prompt,
-            "original_image": user_face_url,
-            "avatar_image": avatar_image_url
+            "original_image": user_face_url
         }
 
     async def step_upscale(self, input_data: Dict, step_config: Dict) -> Dict[str, Any]:

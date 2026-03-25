@@ -114,6 +114,7 @@ MODELS_REQUIRING_INPUT_IMAGE = [
     'picsart-ultra-upscale',
     'picsart-upscale',
     'clipdrop-upscale',
+    'clipdrop-expand',
     'remove-bg',
     'bria_gen_fill',
     'bria_erase',
@@ -124,6 +125,7 @@ MODELS_REQUIRING_INPUT_IMAGE = [
     'bria_expand',
     'bria_enhance',
     'stability-upscale-fast',
+    'gemini-25-flash-aicc',
 ]
 
 MODELS_REQUIRING_INPUT_VIDEO = [
@@ -136,6 +138,7 @@ MODELS_REQUIRING_INPUT_IMAGE_FOR_VIDEO = [
     'motion-2.0',
     'motion-2.0-fast',
     'hailuo-2.3-fast',
+    'wan22-i2v-plus-aicc',
 ]
 
 # Priority lock - when True, only Priority 1 jobs are processed
@@ -349,6 +352,8 @@ def mark_job_failed(job_id, error_message):
 
 
 MAX_PENDING_RETRIES = 2
+MAX_PENDING_RETRIES_AICC = 5  # vision-aicc and cinematic-aicc get more retries
+_AICC_PROVIDERS = ("vision-aicc", "cinematic-aicc")
 
 
 _NO_API_KEY_MARKERS = (
@@ -393,6 +398,7 @@ def reset_job_to_pending(job_id, provider_key, error_message):
         return False
 
     _retry_count_ok = False
+    _max_retries = MAX_PENDING_RETRIES_AICC if provider_key in _AICC_PROVIDERS else MAX_PENDING_RETRIES
     try:
         # The jobs table lives in the MAIN Supabase DB — use supabase_client.supabase,
         # not get_worker1_client() which points to the Worker1 DB (different database).
@@ -404,18 +410,18 @@ def reset_job_to_pending(job_id, provider_key, error_message):
         if job_resp.data:
             meta = job_resp.data[0].get("metadata") or {}
             retry_count = meta.get("pending_retry_count", 0)
-            if retry_count >= MAX_PENDING_RETRIES:
-                print(f"[RESET] Job {job_id} has reached MAX_PENDING_RETRIES ({MAX_PENDING_RETRIES}) - marking as FAILED")
+            if retry_count >= _max_retries:
+                print(f"[RESET] Job {job_id} has reached max retries ({_max_retries}) - marking as FAILED")
                 mark_job_failed(
                     job_id,
-                    f"Job failed after {MAX_PENDING_RETRIES} retry attempts. Last error: {error_message}"
+                    f"Job failed after {_max_retries} retry attempts. Last error: {error_message}"
                 )
                 return False
             meta["pending_retry_count"] = retry_count + 1
             import datetime as _dt
             meta["retry_after"] = (_dt.datetime.utcnow() + _dt.timedelta(seconds=30)).isoformat()
             _main_sb.table("jobs").update({"metadata": meta}).eq("job_id", job_id).execute()
-            print(f"[RESET] Job {job_id} pending retry {retry_count + 1}/{MAX_PENDING_RETRIES}")
+            print(f"[RESET] Job {job_id} pending retry {retry_count + 1}/{_max_retries}")
             _retry_count_ok = True
     except Exception as count_err:
         print(f"[RESET] Warning: could not check/update retry count for job {job_id}: {count_err}")
@@ -428,11 +434,11 @@ def reset_job_to_pending(job_id, provider_key, error_message):
             _r = _main_sb2.table("jobs").select("metadata").eq("job_id", job_id).execute()
             if _r and _r.data:
                 _meta = _r.data[0].get("metadata") or {}
-                if _meta.get("pending_retry_count", 0) >= MAX_PENDING_RETRIES:
+                if _meta.get("pending_retry_count", 0) >= _max_retries:
                     print(f"[RESET] Job {job_id} retry cap hit on fallback check — marking FAILED")
                     mark_job_failed(
                         job_id,
-                        f"Job failed after {MAX_PENDING_RETRIES} retry attempts. Last error: {error_message}"
+                        f"Job failed after {_max_retries} retry attempts. Last error: {error_message}"
                     )
                     return False
         except Exception:
@@ -1262,7 +1268,11 @@ def process_video_job(job):
         is_timeout_error = any(x in error_message.lower() for x in ["timeout", "timed out", "read timeout", "connection timeout", "504"])
         is_network_error = any(x in error_message.lower() for x in ["connection", "httpsconnectionpool", "unable to connect", "network", "unreachable"])
         is_vercel_payload_error = "413" in error_message or "function_payload_too_large" in error_message.lower()
-        
+        is_provider_fetch_error = any(x in error_message.lower() for x in [
+            "fail_to_fetch_task", "datainspection", "invalidparameter.datainspection",
+            "unable to download the media resource",
+        ])
+
         # Only mark as validation error if it's specifically about user input (not API errors)
         # Be very specific to avoid false positives with API errors
         is_validation_error = (
@@ -1317,7 +1327,13 @@ def process_video_job(job):
             print(f"[NETWORK ERROR] Resetting job to PENDING for retry")
             reset_job_to_pending(job_id, provider_key, f"Network/Timeout error: {error_message}")
             return
-        
+
+        if is_provider_fetch_error:
+            print(f"[FETCH ERROR] Provider could not download input media - NOT rotating API key")
+            print(f"[FETCH ERROR] Resetting job to PENDING for retry")
+            reset_job_to_pending(job_id, provider_key, f"Provider media fetch error: {error_message}")
+            return
+
         if is_validation_error:
             print(f"[VALIDATION ERROR] User input validation failed - NOT rotating API key")
             print(f"[VALIDATION ERROR] Error: {error_message}")
@@ -1328,29 +1344,53 @@ def process_video_job(job):
         # All other errors (API errors, provider errors, etc.) - attempt key rotation and retry
         if api_key_id and provider_key:
             print(f"[API ERROR] Provider API error detected - attempting key rotation")
-            print(f"[ROTATION] Attempting to rotate API key...")
-            rotation_success, next_key = handle_api_key_rotation(
-                api_key_id,
-                provider_key,
-                error_message,
-                job_id
-            )
-            log_rotation_attempt(job_id, provider_key, api_key_id, 
-                               next_key.get("id") if next_key else None,
-                               error_message, rotation_success)
-            
-            if rotation_success and next_key:
-                print(f"[RETRY] Retrying video job with new API key...")
-                return process_video_job(job)
-            else:
-                print(f"[ERROR] API key rotation failed or no keys available")
-                notify_error(
-                    ErrorType.API_KEY_ROTATION_FAILED,
-                    f"API key rotation failed for {provider_key}",
-                    context={"provider": provider_key, "job_id": job_id, "error": error_message}
+            if provider_key in NO_DELETE_ROTATE_PROVIDERS:
+                rr_count = job.get("_rr_rotation_count", 0)
+                total_keys = len(get_all_api_keys_for_provider(provider_key)) if provider_key else 0
+                max_attempts = max(total_keys * 2, 4)
+                print(f"[RR-ROTATION] No-delete provider '{provider_key}' | attempt {rr_count + 1} of {max_attempts} max")
+                if rr_count >= max_attempts:
+                    print(f"[RR-ROTATION] Max cycles reached for '{provider_key}' - failing job")
+                    mark_job_failed(job_id, f"All API keys for {provider_key} failed after {max_attempts} rotation attempts. Please try again later.")
+                    return
+                rotation_success, next_key = handle_roundrobin_rotation(
+                    provider_key, error_message, job_id, current_api_key_id=api_key_id
                 )
-                reset_job_to_pending(job_id, provider_key, f"No API key available for provider: {provider_key}")
-                return
+                log_rotation_attempt(job_id, provider_key, api_key_id,
+                                   next_key.get("id") if next_key else None,
+                                   error_message, rotation_success)
+                if rotation_success and next_key:
+                    job["_rr_rotation_count"] = rr_count + 1
+                    print(f"[RR-ROTATION] Retrying video job (attempt {rr_count + 1}/{max_attempts})...")
+                    return process_video_job(job)
+                else:
+                    print(f"[RR-ROTATION] No keys available for '{provider_key}' - failing job")
+                    mark_job_failed(job_id, f"No API keys available for provider: {provider_key}")
+                    return
+            else:
+                print(f"[ROTATION] Attempting to rotate API key...")
+                rotation_success, next_key = handle_api_key_rotation(
+                    api_key_id,
+                    provider_key,
+                    error_message,
+                    job_id
+                )
+                log_rotation_attempt(job_id, provider_key, api_key_id,
+                                   next_key.get("id") if next_key else None,
+                                   error_message, rotation_success)
+
+                if rotation_success and next_key:
+                    print(f"[RETRY] Retrying video job with new API key...")
+                    return process_video_job(job)
+                else:
+                    print(f"[ERROR] API key rotation failed or no keys available")
+                    notify_error(
+                        ErrorType.API_KEY_ROTATION_FAILED,
+                        f"API key rotation failed for {provider_key}",
+                        context={"provider": provider_key, "job_id": job_id, "error": error_message}
+                    )
+                    reset_job_to_pending(job_id, provider_key, f"No API key available for provider: {provider_key}")
+                    return
         
         # Catch-all for any other errors (reset to pending for retry)
         print(f"[UNKNOWN ERROR] Unhandled error type - resetting to PENDING for retry")
@@ -1621,7 +1661,12 @@ def process_image_job(job):
         is_network_error = any(x in error_message.lower() for x in ["connection", "httpsconnectionpool", "unable to connect", "network", "unreachable"])
         is_vercel_payload_error = "413" in error_message or "function_payload_too_large" in error_message.lower()
         is_hf_space_error = ".hf.space" in error_message.lower() or "huggingface.co/models" in error_message.lower()
-        
+        is_model_not_found_error = (
+            ("is not found for api version" in error_message.lower()) or
+            ("not supported for generatecontent" in error_message.lower()) or
+            ("model not found" in error_message.lower())
+        )
+
         # Only mark as validation error if it's specifically about user input (not API errors)
         # Be very specific to avoid false positives with API errors
         is_validation_error = (
@@ -1698,7 +1743,13 @@ def process_image_job(job):
             print(f"[VALIDATION ERROR] Marking job {job_id} as FAILED (not retryable)")
             mark_job_failed(job_id, error_message)
             return
-        
+
+        if is_model_not_found_error and provider_key in ("vision-aicc", "cinematic-aicc"):
+            print(f"[MODEL NOT FOUND] AICC model unavailable after all inner retries - NOT rotating API key")
+            print(f"[MODEL NOT FOUND] Resetting job to PENDING for outer periodic retry")
+            reset_job_to_pending(job_id, provider_key, f"Model not found error: {error_message}")
+            return
+
         # All other errors (API errors, provider errors, etc.) - attempt key rotation and retry
         if api_key_id and provider_key:
             print(f"[API ERROR] Provider API error detected - attempting key rotation")
@@ -1720,7 +1771,8 @@ def process_image_job(job):
                 rotation_success, next_key = handle_roundrobin_rotation(
                     provider_key,
                     error_message,
-                    job_id
+                    job_id,
+                    current_api_key_id=api_key_id,
                 )
                 log_rotation_attempt(job_id, provider_key, api_key_id,
                                    next_key.get("id") if next_key else None,
@@ -1857,33 +1909,45 @@ def validate_job_queue_state_on_startup():
         coordinator = get_job_coordinator()
         state = coordinator.get_active_job_state()
 
-        if not state or not state.get('active_job_id'):
-            print("job_queue_state is clean (no active job)")
+        # Support both legacy single-slot (active_job_id) and new multi-slot (active_jobs) formats
+        active_jobs_list = state.get('active_jobs', []) if state else []
+        legacy_job_id    = state.get('active_job_id') if state else None
+
+        # Collect all job IDs currently held in coordinator slots
+        slot_job_ids = [s.get('job_id') for s in (active_jobs_list or []) if s.get('job_id')]
+        if not slot_job_ids and legacy_job_id:
+            slot_job_ids = [legacy_job_id]
+
+        if not slot_job_ids:
+            print("job_queue_state is clean (no active jobs)")
             print("="*60 + "\n")
             return
 
-        active_job_id = state.get('active_job_id')
-        print(f"Found active job in queue state: {active_job_id}")
+        print(f"Found {len(slot_job_ids)} active slot(s) in queue state: {slot_job_ids}")
 
-        job_response = supabase.table("jobs").select("job_id, status").eq("job_id", active_job_id).execute()
+        stale_found = False
+        for active_job_id in slot_job_ids:
+            job_response = supabase.table("jobs").select("job_id, status").eq("job_id", active_job_id).execute()
 
-        if not job_response.data:
-            print(f"Job {active_job_id} not found in main DB - clearing stale lock")
-            coordinator.clear_active_job()
-            print("✅ Cleared stale job_queue_state")
-            print("="*60 + "\n")
-            return
+            if not job_response.data:
+                print(f"Job {active_job_id} not found in main DB - releasing stale slot")
+                coordinator.release_slot(active_job_id)
+                stale_found = True
+                continue
 
-        job_status = job_response.data[0].get("status")
-        print(f"Job {active_job_id} actual status: {job_status}")
+            job_status = job_response.data[0].get("status")
+            print(f"Job {active_job_id} actual status: {job_status}")
 
-        if job_status in ("completed", "failed", "cancelled", "pending", "pending_retry"):
-            print(f"Job is '{job_status}' - not actually running. Clearing stale lock...")
-            coordinator.clear_active_job()
+            if job_status in ("completed", "failed", "cancelled", "pending", "pending_retry"):
+                print(f"Job {active_job_id} is '{job_status}' - not running. Releasing stale slot...")
+                coordinator.release_slot(active_job_id)
+                stale_found = True
+            else:
+                print(f"Job {active_job_id} is still '{job_status}' - will be reset by reset_running_jobs_to_pending()")
+
+        if stale_found:
             coordinator.process_next_queued_job()
-            print("✅ Cleared stale job_queue_state and triggered next queued job")
-        else:
-            print(f"Job is still '{job_status}' - will be reset by reset_running_jobs_to_pending()")
+            print("✅ Cleared stale slot(s) and triggered next queued job")
 
         print("="*60 + "\n")
 
@@ -2056,58 +2120,26 @@ async def realtime_listener():
                 job_type = record.get("job_type", "image")
                 
                 if job_type == "workflow":
-                    # Guard: UPDATE events for workflow jobs must NOT spawn a fresh
-                    # execution thread.  When the coordinator unblocks a queued workflow
-                    # (clear_job_queue_info sets blocked_by_job_id=NULL), Supabase Realtime
-                    # fires this UPDATE callback.  The coordinator has ALREADY pre-claimed
-                    # the slot and spawned a processing thread via _trigger_job_processing().
-                    # Starting a second thread here causes both threads to call
-                    # coordinator.on_job_start() → both see the self-reservation → both
-                    # get allowed=True → DOUBLE EXECUTION of the same workflow.
+                    # Workflow jobs are ALWAYS executed by app.py (/workflows/execute).
+                    # app.py atomically claims the job (pending → running) and spawns a
+                    # daemon thread before returning the job_id to the client.
                     #
-                    # For workflow UPDATE events we rely on:
-                    #   • coordinator.process_next_queued_job() for coordinator-unblocked jobs
-                    #   • workflow_retry_manager.retry_stale_pending_workflows() (2-min sweep)
-                    #     for jobs reset to pending after a transient / infrastructure error
+                    # This realtime listener must NOT spawn a second execution thread,
+                    # whether the event is INSERT or UPDATE — doing so caused a race
+                    # condition where both app.py and the worker called
+                    # workflow_manager.execute_workflow() for the same job_id,
+                    # running every API step twice and charging credits twice.
                     #
-                    # Only INSERT events (genuine new workflow submissions) should spawn here.
-                    _event_type = (
-                        payload.get("eventType")
-                        or payload.get("data", {}).get("eventType", "INSERT")
+                    # Recovery paths for jobs that were never executed (e.g. app.py crash):
+                    #   • process_all_pending_workflow_jobs() — runs on worker startup
+                    #   • workflow_retry_manager.retry_stale_pending_workflows() — 2-min sweep
+                    #   • on_api_key_inserted() handler — resumes pending_retry workflows
+                    #     when a missing API key is added
+                    print(
+                        f"[WORKFLOW] Realtime event for workflow job {job_id} — "
+                        f"execution owned by app.py, skipping worker dispatch"
                     )
-                    if _event_type == "UPDATE":
-                        print(
-                            f"[WORKFLOW] UPDATE event for {job_id} skipped — "
-                            f"coordinator or retry-manager will dispatch it"
-                        )
-                        sys.stdout.flush()
-                        return
-
-                    print(f"[WORKFLOW] New workflow job {job_id} received via realtime — routing to workflow manager")
                     sys.stdout.flush()
-
-                    def _start_new_workflow():
-                        import asyncio as _asyncio
-                        from workflow_manager import get_workflow_manager
-                        _loop = _asyncio.new_event_loop()
-                        _asyncio.set_event_loop(_loop)
-                        try:
-                            _wm = get_workflow_manager()
-                            _meta = record.get('metadata', {}) or {}
-                            _img = record.get('image_url') or _meta.get('input_image_url')
-                            _loop.run_until_complete(_wm.execute_workflow(
-                                workflow_id=record.get('model'),
-                                input_data=_img,
-                                user_id=record.get('user_id'),
-                                job_id=job_id
-                            ))
-                        except Exception as _wf_err:
-                            print(f"[WORKFLOW] New workflow {job_id} failed: {_wf_err}")
-                        finally:
-                            _loop.close()
-
-                    from workflow_retry_manager import _spawn_workflow_thread
-                    _spawn_workflow_thread(_start_new_workflow, name=f"NewWF-{job_id}")
                     return
                 
                 # Skip UPDATE events for image/video jobs — same policy as workflow jobs.
@@ -2605,6 +2637,15 @@ def handle_api_key_insertion(payload):
 
                 if not validate_job_inputs(job):
                     print(f"   ❌ Workflow job {job_id} missing required inputs — marked as failed, skipping\n")
+                    continue
+
+                # Atomic claim — prevents duplicate execution if periodic retry loop
+                # fires at the same time as this API key insertion handler.
+                from supabase_client import supabase as _sb_claim
+                claim = _sb_claim.table('jobs').update({'status': 'running'}) \
+                    .eq('job_id', job_id).eq('status', 'pending_retry').execute()
+                if not claim.data:
+                    print(f"   ⚠️ Workflow job {job_id} already claimed by another process — skipping\n")
                     continue
 
                 try:

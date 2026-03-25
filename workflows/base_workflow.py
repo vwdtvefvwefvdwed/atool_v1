@@ -27,11 +27,27 @@ class BaseWorkflow(ABC):
         resume: bool = False,
         progress_callback: Optional[Callable] = None
     ) -> Any:
+        # Pre-execution guard: abort immediately if another process already
+        # completed or failed this job before we even begin.  This is the last
+        # line of defence against any residual race that reaches execute().
+        try:
+            _pre_check = supabase.table("jobs").select("status").eq("job_id", job_id).single().execute()
+            if _pre_check.data:
+                _pre_status = _pre_check.data.get("status")
+                if _pre_status in ("completed", "failed"):
+                    logger.warning(
+                        f"[WORKFLOW] Job {job_id} is already '{_pre_status}' before execution "
+                        f"— aborting to prevent duplicate run"
+                    )
+                    return None
+        except Exception as _pre_err:
+            logger.warning(f"[WORKFLOW] Pre-execution status check failed for {job_id}: {_pre_err} — proceeding")
+
         execution = await self._get_or_create_execution(job_id, user_id, resume, input_data)
         self.execution_id = execution['id']
         self.checkpoints = execution.get('checkpoints', {})
         self.job_id = job_id
-        
+
         # Derive start_step from the execution record itself, not the `resume` flag.
         # _get_or_create_execution() always reuses an existing execution when one is
         # found.  If a running workflow was reset to pending by a worker restart and
@@ -58,7 +74,22 @@ class BaseWorkflow(ABC):
             for i in range(start_step, len(self.steps)):
                 step = self.steps[i]
                 step_name = step.get('name', f'step_{i}')
-                
+
+                # Guard: if another process (e.g. app.py) already completed or
+                # failed this job, stop immediately so we don't duplicate work.
+                try:
+                    _status_check = supabase.table("jobs").select("status").eq("job_id", job_id).single().execute()
+                    if _status_check.data:
+                        _ext_status = _status_check.data.get("status")
+                        if _ext_status in ("completed", "failed"):
+                            logger.warning(
+                                f"[WORKFLOW] Job {job_id} is already '{_ext_status}' externally — "
+                                f"aborting execution at step {i} ('{step_name}')"
+                            )
+                            return None
+                except Exception as _sc_err:
+                    logger.warning(f"[WORKFLOW] Could not check external status at step {i}: {_sc_err}")
+
                 await self._update_execution(execution['id'], {
                     'current_step': i,
                     'status': 'running'

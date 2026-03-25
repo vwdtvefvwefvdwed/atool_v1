@@ -8,12 +8,12 @@
   "preview_thumbnail": null,
   "enabled": true,
   "default_prompts": {
-    "image_edit": "Use Image A as a high-fidelity facial reference for likeness and fine features (not strict identity lock). Generate a true photorealistic cinematic close-up of a warrior riding a massive dark fantasy dragon in flight. Dragon face touches the camera with only half visible in frame, roaring with fire glow, wet detailed scales, and natural imperfections. Rider leans forward on the neck saddle, smiling naturally with direct eye contact to camera.\nFace realism priority:\npreserve fine facial feature likeness and proportions\ndetailed eyes, lips, and smile anatomy\nnatural skin pores, micro-wrinkles, subtle asymmetry\nrealistic teeth and lip texture when smiling\naccurate head scale vs shoulders\nSeamless face–body integration:\ncorrect neck thickness and jaw transition\ncontinuous skin tone face→neck→hands\nphysically correct lighting and shadow direction\nmatched exposure and color temperature\nreal contact shadows under chin and gear\nunified depth of field and lens focus\nno seams, halos, or cut-paste artifacts\nBody and gear:\nreal leather/metal armor with wear and micro-scratches\nanatomically correct posture and rein grip\nnatural wind in hair and clothing\nRendering constraints:\nphotographic realism only — not stylized, not CGI, not illustration\nreal cinema lens look, shallow DOF\nfilm color science, global illumination\nno cartoon shading, no plastic skin\nno blur, distortion, or AI artifacts\nultra-detailed, HDR, 8K, sharp focus",
+    "image_edit": "Use Image A as a high-fidelity facial reference for likeness and fine features (not strict identity lock).\nGenerate a true photorealistic cinematic shot of a single warrior riding one massive dark dragon in flight.\nComposition priority:\none dragon only (no extra dragons)\nrider is physically seated on the dragon's neck saddle (clear contact)\nlegs positioned naturally along the dragon's body, hands gripping reins attached to the dragon\ncorrect human riding posture with proper weight and balance\nno floating or disconnected body parts\nCamera framing:\nclose-up cinematic shot\ndragon head partially in frame beside the rider (not duplicated)\ndragon mouth open with subtle fire glow\nboth rider and dragon aligned in the same depth plane\nFace realism priority:\nnatural human face (no stylization)\nvisible skin pores, micro-wrinkles, slight asymmetry\nrealistic eyes, teeth, and lips when smiling\naccurate head-to-body proportions\nSeamless integration:\ncorrect neck anatomy and shoulder alignment\nconsistent skin tone from face to hands\nphysically accurate lighting and shadows\nproper contact shadows between rider and dragon saddle\nno cut-paste look, no halos, no mismatched edges\nDragon realism:\nbiological texture (not cartoon)\ndetailed scales with imperfections, scratches, dirt\nnatural wetness variation and subsurface scattering\nno stylized or exaggerated fantasy shapes\nMaterials:\nrealistic metal armor with wear, scratches, dirt\nleather straps with tension and pressure where gripped\nRendering constraints:\nSTRICT photorealism — no cartoon, no CGI, no illustration\nno plastic skin, no oversmoothing\nreal-world lighting, cinematic lens (85mm), shallow depth of field\nsharp focus on rider face and dragon eye\nHDR, high dynamic range, natural color grading\nno duplication, no distortion, no extra limbs, no artifacts",
     "upscale": "Ultra high-resolution photorealistic dragon rider, sharp focus, intricate details, cinematic quality, 8K, HDR"
   },
   "supported_models": {
     "image_edit": [
-      "nano-banana-pro-leonardo"
+      "gemini-25-flash-aicc"
     ],
     "upscale": [
       "clipdrop-upscale"
@@ -33,8 +33,8 @@
       "type": "generation",
       "description": "AI-powered GOT dragon rider transformation",
       "model_type": "image",
-      "default_model": "nano-banana-pro-leonardo",
-      "provider": "vision-leonardo"
+      "default_model": "gemini-25-flash-aicc",
+      "provider": "vision-aicc"
     },
     {
       "id": 2,

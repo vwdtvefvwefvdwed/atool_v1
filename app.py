@@ -376,6 +376,8 @@ def list_models():
         "vision-ultrafast": [
             {"name": "ultra-fast-nano", "displayName": "Ultra Fast Nano Banana", "type": "image"},
             {"name": "ultra-fast-nano-banana-2", "displayName": "Ultra Fast Nano Banana 2", "type": "image"},
+            {"name": "flux-nano-banana", "displayName": "Flux Nano Banana", "type": "image"},
+            {"name": "nano-banana-gemini", "displayName": "Nano Banana Gemini", "type": "image"},
         ],
         "vision-bria": [
             {"name": "bria_image_generate", "displayName": "Bria Image Generate", "type": "image"},
@@ -1129,41 +1131,59 @@ def get_model_quotas():
 @app.route("/jobs/in-progress", methods=["GET"])
 @require_auth
 def jobs_get_in_progress():
-    """Get user's last pending or running job (for resume after refresh/login)"""
+    """Get user's last job for a given type.
+    Returns pending/running job if one exists, otherwise falls back to the
+    most recent completed/failed job so the frontend can restore the result
+    after navigating away while a job was running.
+    """
     user = get_current_user()
     job_type = request.args.get("job_type", "image")  # Default to image
+    workflow_id = request.args.get("workflow_id", None)  # Optional workflow filter
 
-    print(f"📥 Fetching in-progress job for user {user['user_id']}, type: {job_type}")
+    print(f"📥 Fetching last job for user {user['user_id']}, type: {job_type}, workflow: {workflow_id}")
 
     try:
-        # Query for last pending or running job for this user and job type
-        response = supabase.table("jobs").select("*").eq(
+        # 1. Check for an active (pending/running) job first
+        active_query = supabase.table("jobs").select("*").eq(
             "user_id", user["user_id"]
         ).eq(
             "job_type", job_type
         ).in_(
             "status", ["pending", "running"]
-        ).order("created_at", desc=True).limit(1).execute()
+        )
+        if workflow_id:
+            active_query = active_query.eq("model", workflow_id)
+        active_response = active_query.order("created_at", desc=True).limit(1).execute()
 
-        if response.data and len(response.data) > 0:
-            job = response.data[0]
-            print(f"   ✅ Found in-progress job: {job['job_id']} (status: {job['status']})")
-            return jsonify({
-                "success": True,
-                "job": job
-            }), 200
-        else:
-            print(f"   💤 No in-progress jobs")
-            return jsonify({
-                "success": False,
-                "message": "No in-progress jobs found"
-            }), 200
+        if active_response.data and len(active_response.data) > 0:
+            job = active_response.data[0]
+            print(f"   ✅ Found active job: {job['job_id']} (status: {job['status']})")
+            return jsonify({"success": True, "job": job}), 200
+
+        # 2. No active job — fall back to last completed/failed job so the
+        #    frontend can restore results that finished while the page was unmounted.
+        fallback_query = supabase.table("jobs").select("*").eq(
+            "user_id", user["user_id"]
+        ).eq(
+            "job_type", job_type
+        ).in_(
+            "status", ["completed", "failed"]
+        )
+        if workflow_id:
+            fallback_query = fallback_query.eq("model", workflow_id)
+        fallback_response = fallback_query.order("created_at", desc=True).limit(1).execute()
+
+        if fallback_response.data and len(fallback_response.data) > 0:
+            job = fallback_response.data[0]
+            print(f"   📦 Found last completed/failed job: {job['job_id']} (status: {job['status']})")
+            return jsonify({"success": True, "job": job}), 200
+
+        print(f"   💤 No jobs found for type: {job_type}")
+        return jsonify({"success": False, "message": "No jobs found"}), 200
+
     except Exception as e:
-        print(f"   ❌ Error fetching in-progress job: {e}")
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
+        print(f"   ❌ Error fetching last job: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 @app.route("/jobs/<job_id>/stream", methods=["GET"])
@@ -1563,8 +1583,16 @@ def worker_reset_job(job_id):
         from job_coordinator import get_job_coordinator
         coordinator = get_job_coordinator()
         state = coordinator.get_active_job_state()
-        if state and state.get('active_job_id') == job_id:
-            coordinator.clear_active_job()
+        # Check both legacy single-slot (active_job_id) and new multi-slot (active_jobs) formats
+        active_jobs_list = state.get('active_jobs', []) if state else []
+        job_is_active = (
+            state and (
+                state.get('active_job_id') == job_id or
+                any(s.get('job_id') == job_id for s in (active_jobs_list or []))
+            )
+        )
+        if job_is_active:
+            coordinator.release_slot(job_id)
             coordinator.process_next_queued_job()
             print(f"[COORDINATOR] Cleared stale active-job lock for reset job {job_id} and triggered next queued job")
     except Exception as coord_err:
@@ -2591,7 +2619,26 @@ def execute_workflow():
         
         job = job_result['job']
         job_id = job['id']
-        
+
+        # Atomically claim the job: transition pending → running only if it is
+        # still pending.  This is a compare-and-swap via Supabase's conditional
+        # update — if any other process (e.g. a stale realtime event) already
+        # claimed the job, the update matches no rows and we bail out early,
+        # preventing double execution.
+        try:
+            claim_resp = supabase.table("jobs").update(
+                {"status": "running"}
+            ).eq("job_id", job_id).eq("status", "pending").execute()
+
+            if not claim_resp.data:
+                print(f"⚠️ Workflow job {job_id} already claimed by another process — aborting spawn")
+                return jsonify({
+                    "success": False,
+                    "error": "Job was already claimed by another process. Please try again."
+                }), 409
+        except Exception as claim_err:
+            print(f"⚠️ Could not perform atomic claim for job {job_id}: {claim_err} — proceeding anyway")
+
         def run_workflow():
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
@@ -2608,7 +2655,7 @@ def execute_workflow():
                 print(f"❌ Workflow execution error: {e}")
             finally:
                 loop.close()
-        
+
         import threading
         thread = threading.Thread(target=run_workflow, daemon=True)
         thread.start()

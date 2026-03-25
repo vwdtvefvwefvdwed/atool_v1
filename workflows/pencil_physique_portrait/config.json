@@ -8,12 +8,12 @@
   "preview_thumbnail": null,
   "enabled": true,
   "default_prompts": {
-    "image_edit": "Use Image A as a high-fidelity facial reference for likeness and fine features (not strict identity lock). Generate a highly detailed black-and-white pencil sketch illustration of a skinny athletic Black male subject — upper body from waist-up, shirtless, clearly defined six-pack abs and natural lean muscular anatomy. The subject stands in a 3/4 angled pose with his head slightly tilted downward, gaze directed slightly below the camera (no eye contact), calm and introspective expression. Enforce realistic anatomical proportions with accurate ribcage, shoulders, collarbone, and abdominal structure. The style must look like traditional graphite pencil drawing with visible sketch strokes, layered shading, cross-hatching, tonal gradients built from pencil pressure variation, and subtle paper grain texture. Do NOT use smooth digital airbrush shading, vector lines, or flat clip-art style; enforce raw hand-drawn realism with organic line variation and natural imperfections. Background should be clean white or light studio tone with soft graphite falloff. Preserve facial structure, jawline, cheekbones, and head-to-body scale from Image A while adapting into a realistic pencil sketch form. High contrast lighting expressed through shading density, ultra-detailed, sharp anatomy rendering, no color, no stylization, no cartoon look, no plastic skin effect, no AI artifacts.",
+    "image_edit": "Image A = FACE SOURCE (strict lock)\nImage B = BODY + POSE SOURCE\nGenerate a highly detailed black-and-white pencil sketch.\nCRITICAL:\nUse ONLY Image A for the face. Do not use Image B for facial structure under any condition.\nFace rules (absolute lock from Image A):\n- exact face shape, jawline, cheekbones\n- exact eyes, nose, lips\n- exact hairstyle, hair volume, hairline\n- exact beard style and density\n- preserve identity and proportions 1:1\nBody rules (from Image B only):\n- torso, anatomy, pose, shoulders, abs\n- skinny athletic build, shirtless, waist-up\n- 3/4 angle, head slightly down, gaze below camera\nIf conflict occurs: PRIORITIZE IMAGE A FACE and ignore Image B face completely.\nStyle:\ntraditional graphite pencil sketch, visible strokes, cross-hatching, natural shading, paper grain.\nNo stylization, no face reinterpretation, no mixing identities, no cartoon, no smooth digital shading.\nLighting:\nhigh contrast pencil shading, clean white background.",
     "upscale": "Ultra high-resolution black-and-white pencil sketch portrait, sharp detailed graphite strokes, fine anatomy rendering, paper grain texture, 8K, HDR"
   },
   "supported_models": {
     "image_edit": [
-      "nano-banana-pro-leonardo"
+      "gemini-25-flash-aicc"
     ],
     "upscale": [
       "clipdrop-upscale"
@@ -33,8 +33,8 @@
       "type": "generation",
       "description": "AI-powered pencil physique portrait transformation",
       "model_type": "image",
-      "default_model": "nano-banana-pro-leonardo",
-      "provider": "vision-leonardo"
+      "default_model": "gemini-25-flash-aicc",
+      "provider": "vision-aicc"
     },
     {
       "id": 2,

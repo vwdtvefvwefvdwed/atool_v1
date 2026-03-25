@@ -8,12 +8,12 @@
   "preview_thumbnail": null,
   "enabled": true,
   "default_prompts": {
-    "image_edit": "Use Image A as a high-fidelity facial reference for likeness and fine features (not strict identity lock). Create a highly detailed pencil and charcoal head-and-shoulders sketch of a young woman, gently forward-facing with a slight head tilt, large expressive eyes, and a soft warm smile. Enforce traditional hand-drawn style with visible graphite/charcoal strokes, layered cross-hatching, varied bold and fine lines, and tonal depth built only through sketch shading. Hair should be voluminous and slightly messy with many individually drawn strands and natural pencil flow. No photorealism, no digital airbrushing, no vector lines, no color painting — maintain organic paper texture and natural drawing imperfections. Lightly suggest simple fantasy-inspired fabric with minimal detail to keep focus on the face. Background: warm paper tone with soft vignette, no hard elements. Preserve accurate facial proportions, eyes, lips, and bone structure from Image A in charcoal-pencil form. Ultra-detailed, studio quality, clean composition, no blur, no color fill, no cartoon style, no plastic skin, no AI artifacts.",
+    "image_edit": "Image A = face source. Create a highly detailed pencil and charcoal head-and-shoulders sketch of a young woman. Face construction: Build the face directly from Image A facial structure (do not redesign or reinterpret). Preserve exact face shape, jawline, cheekbones. Preserve exact eyes, nose, lips, spacing, and proportions. Maintain likeness clearly derived from Image A. Expression & pose: Gently forward-facing with a slight head tilt, large expressive eyes, and a soft warm smile. Hair: Voluminous and slightly messy with many individually drawn strands, natural pencil flow. Style: Traditional graphite and charcoal drawing only — visible strokes, cross-hatching, layered shading, tonal depth from pencil pressure. No photorealism, no digital airbrush, no vector lines, no color. Rendering rules: organic paper texture and natural imperfections, no face stylization or reshaping, no cartoon look, no plastic skin, no AI artifacts. Clothing: Light fantasy-inspired fabric, minimal detail to keep focus on the face. Background: Warm paper tone with soft vignette, no hard elements. Final requirement: The face must clearly match the structure of Image A while adapted into a charcoal-pencil drawing.",
     "upscale": "Ultra high-resolution charcoal pencil sketch portrait, fine cross-hatching strokes, expressive tonal shading, paper grain texture, art-studio quality, 8K, HDR"
   },
   "supported_models": {
     "image_edit": [
-      "nano-banana-pro-leonardo"
+      "gemini-25-flash-aicc"
     ],
     "upscale": [
       "clipdrop-upscale"
@@ -33,8 +33,8 @@
       "type": "generation",
       "description": "AI-powered crosshatch girl study transformation",
       "model_type": "image",
-      "default_model": "nano-banana-pro-leonardo",
-      "provider": "vision-leonardo"
+      "default_model": "gemini-25-flash-aicc",
+      "provider": "vision-aicc"
     },
     {
       "id": 2,

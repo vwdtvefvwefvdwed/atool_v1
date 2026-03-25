@@ -40,5 +40,14 @@
   },
   "cinematic-deapi": {
     "current_row": 2
+  },
+  "vision-aicc": {
+    "current_row": 1
+  },
+  "vision-felo": {
+    "current_row": 1
+  },
+  "cinematic-aicc": {
+    "current_row": 1
   }
 }

@@ -48,24 +48,24 @@ class WorkflowManager:
         required_models = coordinator.get_workflow_models(workflow_config)
         
         logger.info(f"Executing workflow {workflow_id} for job {job_id} - Models: {required_models}")
-        
+
+        coordinator_slot_claimed = False  # set True only after on_job_start succeeds
         # Check with coordinator if workflow can start
         start_result = coordinator.on_job_start(job_id, "workflow", required_models)
-        
+
         if not start_result['allowed']:
-            # Workflow is blocked — coordinator already set blocked_by_job_id on the jobs row.
-            # DO NOT try to UPDATE workflow_executions here: the execution record does not exist
-            # yet (it is created inside base_workflow.execute). An UPDATE on a non-existent row
-            # is a silent no-op that leaves the job permanently stuck when the blocking job
-            # finishes and the coordinator tries to resume via execution_id.
+            # Workflow is blocked — coordinator already set blocked_by_job_id on the jobs row
+            # and reset status running→pending so process_next_queued_job() can find it.
+            # DO NOT call on_job_complete here: no slot was claimed, so releasing would be
+            # a no-op and would trigger a spurious process_next_queued_job() call.
             logger.warning(f"Workflow {job_id} blocked: {start_result['reason']}")
             raise RuntimeError(f"Workflow queued: {start_result['reason']}")
-        
+
         logger.info(f"Workflow {job_id} allowed to start: {start_result['reason']}")
-        
-        # Wrap everything after on_job_start() in try/finally so the coordinator
-        # slot is ALWAYS released — even if workflow_class() instantiation or the
-        # workflow_executions UPDATE raises before the inner try block is reached.
+
+        # Slot is now claimed.  Wrap the rest in try/finally so the slot is
+        # ALWAYS released — even if instantiation or DB writes raise before execute().
+        coordinator_slot_claimed = True
         try:
             # Store required_models in workflow_executions table
             try:
@@ -92,7 +92,8 @@ class WorkflowManager:
             logger.error(f"Workflow {job_id} failed: {e}")
             raise
         finally:
-            coordinator.on_job_complete(job_id, "workflow")
+            if coordinator_slot_claimed:
+                coordinator.on_job_complete(job_id, "workflow")
     
     async def resume_workflow(
         self, 
@@ -111,10 +112,10 @@ class WorkflowManager:
                 .execute()
             if job_check.data:
                 current_status = job_check.data.get('status')
-                if current_status not in ('pending_retry', 'pending'):
+                if current_status in ('completed', 'failed'):
                     logger.info(
                         f"[RESUME] Skipping resume for {job_id} — "
-                        f"status is '{current_status}', not resumable"
+                        f"status is '{current_status}', already terminal"
                     )
                     return None
         except Exception as status_err:
@@ -149,33 +150,31 @@ class WorkflowManager:
             required_models = coordinator.get_workflow_models(workflow_config)
         
         logger.info(f"Resuming workflow {workflow_id} from execution {execution_id} - Models: {required_models}")
-        
+
+        coordinator_slot_claimed = False  # set True only after on_job_start succeeds
         # Check with coordinator if workflow can resume
         start_result = coordinator.on_job_start(job_id, "workflow", required_models)
-        
+
         if not start_result['allowed']:
-            # Workflow is blocked
+            # Workflow resume is blocked — coordinator already set blocked_by_job_id and
+            # reset status running→pending.  Do NOT call on_job_complete (no slot was claimed).
             logger.warning(f"Workflow resume blocked for {job_id}: {start_result['reason']}")
-            
-            # Update workflow_executions table with blocking info
+
             try:
                 supabase.table('workflow_executions').update({
-                    'required_models': required_models,
+                    'required_models':   required_models,
                     'blocked_by_job_id': start_result.get('blocked_by'),
-                    'status': 'pending_retry'
+                    'status':            'pending_retry'
                 }).eq('id', execution_id).execute()
             except Exception as e:
                 logger.error(f"Failed to update workflow execution: {e}")
-            
-            # Raise exception to indicate workflow is queued
+
             raise RuntimeError(f"Workflow resume queued: {start_result['reason']}")
-        
+
         logger.info(f"Workflow {job_id} allowed to resume: {start_result['reason']}")
 
-        # From here, the coordinator slot is claimed. Wrap everything in
-        # try/finally so on_job_complete() is guaranteed to run even if an
-        # exception occurs before the inner try block (e.g. DB lookup failure,
-        # workflow class instantiation error).
+        # Slot claimed — wrap in try/finally so on_job_complete() always fires.
+        coordinator_slot_claimed = True
         try:
             return await self._execute_resume(
                 execution_id=execution_id,
@@ -192,7 +191,8 @@ class WorkflowManager:
             logger.error(f"Workflow {job_id} resume failed: {e}")
             raise
         finally:
-            coordinator.on_job_complete(job_id, "workflow")
+            if coordinator_slot_claimed:
+                coordinator.on_job_complete(job_id, "workflow")
 
     async def _execute_resume(
         self,

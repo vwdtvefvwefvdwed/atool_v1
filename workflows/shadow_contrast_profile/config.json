@@ -8,12 +8,12 @@
   "preview_thumbnail": null,
   "enabled": true,
   "default_prompts": {
-    "image_edit": "Use Image A as a high-fidelity facial reference for likeness and fine features (not strict identity lock). Generate a true photorealistic black-and-white studio portrait in a dramatic near-frontal pose — chest-up framing, torso facing forward with only a subtle 10–20 degree turn so both shoulders are fully visible and evenly framed, head slightly angled without hiding shoulder structure, eyes looking directly at the camera with a deep, intense expression. Use a controlled studio setup with a dark plain background and high-contrast cinematic side lighting that sculpts the face while still illuminating both shoulders. The subject must wear a dark button-up shirt with the top button clearly undone and the collar open in a relaxed V-shape, with visible collar separation and neckline; no closed collar, no tight neck, and no top button fastened or visible as closed. Enforce sharp photographic realism with natural hair texture, visible skin pores and micro-details, realistic fabric folds around the open collar, accurate facial proportions, correct head-to-shoulder scale from Image A, consistent skin tone, and proper shadow direction. Use an 85–100mm portrait lens look, shallow depth of field, film-grade monochrome grading, ultra-detailed, HDR clarity, razor-sharp eye focus, no color, no painterly or sketch style, no fantasy theme, no stylization, no plastic skin, and no AI artifacts.",
+    "image_edit": "Image A = identity source. Task: Generate a true photorealistic black-and-white studio portrait using the EXACT face from Image A. ABSOLUTE FACE LOCK (NON-NEGOTIABLE): The face must be directly derived from Image A with no changes. Preserve exact geometry: face shape, jawline, cheekbones, forehead, chin. Preserve exact eyes, nose, lips, spacing, proportions. Preserve exact hairstyle, hairline, density, texture. Preserve exact beard/mustache shape and thickness (if present). DO NOT: redesign the face, beautify, stylize, or modify features, change proportions or structure, blend with any other face. If any conflict occurs, IGNORE all other instructions and keep Image A face unchanged. IDENTITY REQUIREMENT: The output must look like the SAME PERSON as Image A (recognizable immediately). Composition: Near-frontal studio portrait, chest-up, torso slightly turned (10–20°), both shoulders visible, head slightly angled, direct eye contact with intense expression. Clothing: Dark button-up shirt, top button undone, collar open in relaxed V-shape. Lighting: Dark background, cinematic side lighting shaping the face while keeping both shoulders visible. Photorealism: real skin texture, pores, imperfections, natural hair strands, realistic fabric folds, correct proportions from Image A. Lens: 85–100mm portrait look, shallow depth of field, sharp focus on eyes, HDR clarity, monochrome. STRICT OUTPUT RULE: This is a face-preservation task, NOT a face-generation task.",
     "upscale": "Ultra high-resolution black-and-white studio portrait, cinematic side lighting, razor-sharp eye focus, film-grade monochrome, skin pore detail, 8K, HDR"
   },
   "supported_models": {
     "image_edit": [
-      "nano-banana-pro-leonardo"
+      "gemini-25-flash-aicc"
     ],
     "upscale": [
       "clipdrop-upscale"
@@ -33,8 +33,8 @@
       "type": "generation",
       "description": "AI-powered shadow contrast profile transformation",
       "model_type": "image",
-      "default_model": "nano-banana-pro-leonardo",
-      "provider": "vision-leonardo"
+      "default_model": "gemini-25-flash-aicc",
+      "provider": "vision-aicc"
     },
     {
       "id": 2,

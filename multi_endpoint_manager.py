@@ -18,12 +18,16 @@ Routes generation requests to different API providers based on provider key:
 - cinematic-bria → Bria AI Cinematic (Video editing and generation)
 - cinematic-vercel, vision-vercel → Vercel AI Gateway (xAI Grok models)
 - vision-frenix → Frenix API (Image generation)
+- vision-aicc → AICC API (Image generation / img2img via Gemini 2.5 Flash)
+- cinematic-aicc → AICC API (Video generation via Wan 2.2 i2v-plus)
+- vision-felo → Felo AI API (Text-to-image + image editing via nano-banana-2)
 """
 
 import os
 import time
 import requests
 import base64
+import json
 from urllib.parse import urlparse, unquote
 from dotenv_vault import load_dotenv
 import replicate
@@ -138,6 +142,8 @@ HUGGINGFACE_SERVERLESS_MODELS = {
 RAPIDAPI_MODELS = {
     'ultra-fast-nano': 'ultra-fast-nano-banana-2',
     'ultra-fast-nano-banana-2': 'ultra-fast-nano-banana-2',
+    'flux-nano-banana': 'flux-nano-banana',
+    'nano-banana-gemini': 'nano-banana-gemini',
 }
 
 # A4F Models - OpenAI-compatible API at https://api.a4f.co/v1
@@ -269,12 +275,29 @@ PICSART_MODELS = {
 # Clipdrop Image Upscaling Models - https://clipdrop-api.co
 CLIPDROP_MODELS = {
     'clipdrop-upscale': 'upscale',  # 2x upscale
+    'clipdrop-expand':  'uncrop',   # outpainting / image expansion
 }
 
 # Frenix Image Models - https://api.frenix.sh/v1
 FRENIX_IMAGE_MODELS = {
     'frenix-dirtberry':  'provider-2/dirtberry',
     'frenix-flux-2-pro': 'provider-2/flux-2-pro',
+}
+
+# AICC Image Models - https://api.ai.cc/v1
+AICC_IMAGE_MODELS = {
+    'gemini-25-flash-aicc': 'gemini-2.5-flash-image-preview',
+}
+
+# AICC Video Models - https://api.ai.cc/v1
+AICC_VIDEO_MODELS = {
+    'wan22-i2v-plus-aicc': 'wan2.2-i2v-plus',
+}
+
+# Felo AI Models - https://openapi.felo.ai/v2
+# nano-banana-2 = Gemini 2.5 Flash Image; supports text-to-image and image editing
+FELO_MODELS = {
+    'nano-banana-2': 'nano-banana-2',
 }
 
 # Vercel AI Gateway Models - https://ai-gateway.vercel.sh/v1
@@ -370,7 +393,12 @@ ENDPOINT_IMAGE_INPUT_SUPPORT = {
     'clipdrop': {
         'supported': True,
         'requires_image': True,
-        'notes': 'clipdrop-upscale REQUIRES input image. Doubles resolution.',
+        'notes': 'clipdrop-upscale REQUIRES input image. Doubles resolution. clipdrop-expand REQUIRES input image. Expands canvas to target aspect ratio.',
+    },
+    'felo': {
+        'supported': True,
+        'notes': 'nano-banana-2 supports both text-to-image and image editing. Image passed as base64 data URL.',
+        'models_supporting_image': ['nano-banana-2'],
     },
 }
 
@@ -398,7 +426,10 @@ PROVIDER_ROUTING = {
     'vision-vercel': 'vercel_ai_gateway',
     'vision-picsart': 'picsart',
     'vision-clipdrop': 'clipdrop',
-    'vision-frenix': 'frenix',
+    'vision-frenix':    'frenix',
+    'vision-aicc':      'aicc',
+    'cinematic-aicc':   'aicc',
+    'vision-felo':      'felo',
 }
 
 
@@ -427,6 +458,9 @@ PROVIDER_ALLOWED_IMAGE_FORMATS = {
     'vision-picsart':       ['jpg', 'jpeg', 'png', 'webp'],
     'vision-clipdrop':      ['jpg', 'jpeg', 'png', 'webp'],
     'vision-frenix':        [],
+    'vision-aicc':          ['jpg', 'jpeg', 'png', 'webp'],
+    'cinematic-aicc':       ['jpg', 'jpeg', 'png', 'webp'],
+    'vision-felo':          [],
 }
 
 
@@ -517,6 +551,10 @@ def get_endpoint_type(provider_key, model_name=None):
             return 'clipdrop'
         if model_name in FRENIX_IMAGE_MODELS:
             return 'frenix'
+        if model_name in AICC_IMAGE_MODELS or model_name in AICC_VIDEO_MODELS:
+            return 'aicc'
+        if model_name in FELO_MODELS:
+            return 'felo'
     return 'replicate'
 
 
@@ -1060,85 +1098,146 @@ def generate_with_rapidapi(prompt, model, aspect_ratio, api_key, input_image_url
     Handles both URL and base64-encoded image responses.
     Supports multiple reference images via input_image_url parameter (can be a single URL or list of URLs).
     """
-    # RapidAPI host
-    rapidapi_host = "ultra-fast-nano-banana-22.p.rapidapi.com"
-    
-    # API key is the RapidAPI key
     rapidapi_key = api_key
-    
-    url = f"https://{rapidapi_host}/index.php"
-    
-    payload = {
-        "prompt": prompt,
+
+    ASYNC_RAPIDAPI_MODELS = {
+        'flux-nano-banana': ("flux-api-4-custom-models-100-style.p.rapidapi.com", "Flux Nano Banana"),
+        'nano-banana-gemini': ("nano-banana-pro-google-gemini-free1.p.rapidapi.com", "Nano Banana Gemini"),
     }
-    
-    # Add image URL(s) if provided (for image-to-image)
-    # Supports both single URL (string) and multiple URLs (list)
-    if input_image_url:
-        validate_image_format(input_image_url, ['jpg', 'jpeg', 'png', 'webp'], '[RapidAPI]')
-        if isinstance(input_image_url, list):
-            payload["image_urls"] = input_image_url
-        else:
-            payload["image_urls"] = [input_image_url]
-    
+
+    if model in ASYNC_RAPIDAPI_MODELS:
+        rapidapi_host, model_display = ASYNC_RAPIDAPI_MODELS[model]
+        endpoint_path = "/create-v9"
+        payload = {
+            "prompt": prompt,
+        }
+        if aspect_ratio:
+            payload["aspect_ratio"] = aspect_ratio
+        if input_image_url:
+            validate_image_format(input_image_url, ['jpg', 'jpeg', 'png', 'webp'], '[RapidAPI]')
+            if isinstance(input_image_url, list):
+                payload["images"] = input_image_url
+            else:
+                payload["images"] = [input_image_url]
+        is_async = True
+    else:
+        rapidapi_host = "ultra-fast-nano-banana-22.p.rapidapi.com"
+        endpoint_path = "/index.php"
+        payload = {
+            "prompt": prompt,
+        }
+        if input_image_url:
+            validate_image_format(input_image_url, ['jpg', 'jpeg', 'png', 'webp'], '[RapidAPI]')
+            if isinstance(input_image_url, list):
+                payload["image_urls"] = input_image_url
+            else:
+                payload["image_urls"] = [input_image_url]
+        model_display = "Ultra Fast Nano Banana"
+        is_async = False
+
+    api_url = f"https://{rapidapi_host}{endpoint_path}"
+
     headers = {
         "x-rapidapi-host": rapidapi_host,
         "x-rapidapi-key": rapidapi_key,
         "Content-Type": "application/json"
     }
-    
-    print(f"[RapidAPI] Running model: Ultra Fast Nano Banana")
+
+    print(f"[RapidAPI] Running model: {model_display}")
     print(f"[RapidAPI] Host: {rapidapi_host}")
     print(f"[RapidAPI] Prompt: {prompt}")
     if input_image_url:
         if isinstance(input_image_url, list):
             print(f"[RapidAPI] Reference Images: {len(input_image_url)} images")
-            for idx, url in enumerate(input_image_url, 1):
-                print(f"[RapidAPI]   Image {idx}: {url[:100]}...")
+            for idx, img_url in enumerate(input_image_url, 1):
+                print(f"[RapidAPI]   Image {idx}: {img_url[:100]}...")
         else:
             print(f"[RapidAPI] Reference Image: {input_image_url}")
-    
+
     try:
         response = requests.post(
-            url,
+            api_url,
             headers=headers,
             json=payload,
             timeout=120
         )
-        
+
         print(f"[RapidAPI] Response status: {response.status_code}")
-        
+
         if response.status_code != 200:
             error_msg = f"RapidAPI error {response.status_code}: {response.text}"
             print(f"[RapidAPI] Error: {error_msg}")
             raise Exception(error_msg)
-        
+
         result = response.json()
         print(f"[RapidAPI] Response keys: {result.keys() if isinstance(result, dict) else 'not a dict'}")
-        
-        # Check for base64-encoded image response
+
+        # Async flow: POST returns jobId, poll until completed
+        if is_async and isinstance(result, dict) and "jobId" in result:
+            job_id = result["jobId"]
+            print(f"[RapidAPI] Async job submitted. Job ID: {job_id}")
+
+            poll_url = f"https://{rapidapi_host}{endpoint_path}/job-status?jobId={job_id}"
+            max_attempts = 40
+            poll_interval = 5
+
+            for attempt in range(max_attempts):
+                time.sleep(poll_interval)
+
+                poll_response = requests.get(poll_url, headers=headers, timeout=30)
+                print(f"[RapidAPI] Poll {attempt + 1}/{max_attempts}: status {poll_response.status_code}")
+
+                if poll_response.status_code != 200:
+                    error_msg = f"RapidAPI polling error {poll_response.status_code}: {poll_response.text}"
+                    print(f"[RapidAPI] Error: {error_msg}")
+                    raise Exception(error_msg)
+
+                poll_result = poll_response.json()
+                status = poll_result.get("status", "")
+                progress = poll_result.get("progress", 0)
+                print(f"[RapidAPI] Job status: {status}, progress: {progress}%")
+
+                if status in ("failed", "error"):
+                    error_msg = poll_result.get("error", poll_result.get("message", poll_result.get("errorMessage", "Unknown error")))
+                    print(f"[RapidAPI] Job errored. Full response: {poll_result}")
+                    raise Exception(f"RapidAPI job failed: {error_msg}")
+
+                if status == "completed":
+                    image_url = (
+                        poll_result.get("imageUrl")
+                        or poll_result.get("outputUrl")
+                        or poll_result.get("image_url")
+                        or poll_result.get("url")
+                        or poll_result.get("output")
+                        or poll_result.get("result")
+                    )
+                    if not image_url and isinstance(poll_result.get("images"), list) and poll_result["images"]:
+                        image_url = poll_result["images"][0]
+                    if image_url:
+                        print(f"[RapidAPI] Job completed! Image URL: {image_url}")
+                        return {"success": True, "url": image_url, "type": "image"}
+                    raise Exception(f"RapidAPI job completed but no image URL found. Response: {poll_result}")
+
+            raise Exception(f"RapidAPI job {job_id} timed out after {max_attempts * poll_interval} seconds")
+
+        # Sync flow: response contains image directly
         if isinstance(result, dict):
-            # Check for base64 in various field names
             base64_data = None
             base64_fields = ["image_base64", "image", "output", "data"]
-            
+
             for field in base64_fields:
                 if field in result and isinstance(result[field], str) and len(result[field]) > 100:
-                    # Check if it looks like base64
                     if result[field].startswith(('iVBOR', '/9j/', 'data:image')):
                         base64_data = result[field]
-                        # Strip data URI prefix if present
                         if base64_data.startswith('data:image'):
                             base64_data = base64_data.split(',')[1]
                         print(f"[RapidAPI] Found base64 data in field '{field}'")
                         break
-            
-            # If we have base64 data, return it
+
             if base64_data:
                 print(f"[RapidAPI] Detected base64 image response ({len(base64_data)} chars)")
                 return {"success": True, "data": base64_data, "type": "image", "is_base64": True}
-            
-            # Check for URL response
+
             image_url = None
             if "image_url" in result:
                 image_url = result["image_url"]
@@ -1156,13 +1255,13 @@ def generate_with_rapidapi(prompt, model, aspect_ratio, api_key, input_image_url
                     image_url = first_image
                 elif isinstance(first_image, dict) and "url" in first_image:
                     image_url = first_image["url"]
-            
+
             if image_url:
                 print(f"[RapidAPI] Image URL: {image_url}")
                 return {"success": True, "url": image_url, "type": "image"}
-        
+
         raise Exception(f"RapidAPI response missing image data or URL. Response: {result}")
-        
+
     except requests.exceptions.Timeout:
         error_msg = "RapidAPI request timeout after 120 seconds"
         print(f"[RapidAPI] Error: {error_msg}")
@@ -3307,11 +3406,24 @@ def generate_with_picsart(prompt, model, aspect_ratio, api_key, input_image_url=
 
 def generate_with_clipdrop(prompt, model, aspect_ratio, api_key, input_image_url=None, job_type="image", **kwargs):
     """
+    Dispatch to the appropriate Clipdrop endpoint based on model.
+    - clipdrop-upscale: POST https://clipdrop-api.co/image-upscaling/v1/upscale
+    - clipdrop-expand:  POST https://clipdrop-api.co/uncrop/v1
+    Auth: x-api-key header
+    Credits: 1 credit per successful call. 402 = exhausted.
+    """
+    if model == 'clipdrop-expand':
+        return _clipdrop_expand(api_key=api_key, input_image_url=input_image_url, aspect_ratio=aspect_ratio)
+
+    # default: upscale
+    return _clipdrop_upscale(api_key=api_key, input_image_url=input_image_url)
+
+
+def _clipdrop_upscale(api_key, input_image_url):
+    """
     Upscale an image using Clipdrop Image Upscaling API.
     Endpoint: POST https://clipdrop-api.co/image-upscaling/v1/upscale
-    Auth: x-api-key header
     Response: binary PNG image
-    Credits: Depletes Clipdrop API credits. 402 = exhausted.
     """
     import io
     from PIL import Image as PILImage
@@ -3375,6 +3487,112 @@ def generate_with_clipdrop(prompt, model, aspect_ratio, api_key, input_image_url
         "success": True,
         "is_raw_bytes": True,
         "data": upscaled_bytes,
+        "type": "image"
+    }
+
+
+def _clipdrop_expand(api_key, input_image_url, aspect_ratio=None):
+    """
+    Expand an image using Clipdrop Uncrop API.
+    Endpoint: POST https://clipdrop-api.co/uncrop/v1
+    Computes extend amounts from the target aspect_ratio vs original image dimensions.
+    Max 10 megapixels input, max 2000px extend per direction.
+    Response: JPEG image.
+    """
+    import io
+    import math
+    from PIL import Image as PILImage
+
+    if not input_image_url:
+        raise Exception("Clipdrop expand requires an input image")
+
+    validate_image_format(input_image_url, ['jpg', 'jpeg', 'png', 'webp'], '[Clipdrop-Expand]')
+
+    print(f"[Clipdrop-Expand] Downloading input image: {input_image_url}")
+    img_response = requests.get(input_image_url, timeout=60)
+    if img_response.status_code != 200:
+        raise Exception(f"Failed to download input image: {img_response.status_code}")
+
+    image_data = img_response.content
+    pil_img = PILImage.open(io.BytesIO(image_data))
+    orig_w, orig_h = pil_img.size
+    print(f"[Clipdrop-Expand] Original size: {orig_w}x{orig_h}")
+
+    # Cap input to 10 megapixels
+    MAX_INPUT_PIXELS = 10_000_000
+    if orig_w * orig_h > MAX_INPUT_PIXELS:
+        scale = math.sqrt(MAX_INPUT_PIXELS / (orig_w * orig_h))
+        capped_w = int(orig_w * scale)
+        capped_h = int(orig_h * scale)
+        print(f"[Clipdrop-Expand] Downscaling {orig_w}x{orig_h} → {capped_w}x{capped_h} (10MP limit)")
+        pil_img = pil_img.resize((capped_w, capped_h), PILImage.LANCZOS)
+        buf = io.BytesIO()
+        pil_img.save(buf, format='JPEG', quality=95)
+        image_data = buf.getvalue()
+        orig_w, orig_h = capped_w, capped_h
+
+    # Compute extend amounts from target aspect ratio
+    extend_left = extend_right = extend_up = extend_down = 0
+    MAX_EXTEND = 2000
+
+    if aspect_ratio and ':' in str(aspect_ratio):
+        try:
+            ar_parts = str(aspect_ratio).split(':')
+            target_ar = float(ar_parts[0]) / float(ar_parts[1])
+            current_ar = orig_w / orig_h
+
+            if target_ar > current_ar:
+                # Need to expand width
+                target_w = int(orig_h * target_ar)
+                total_extend = target_w - orig_w
+                extend_left = min(total_extend // 2, MAX_EXTEND)
+                extend_right = min(total_extend - extend_left, MAX_EXTEND)
+            elif target_ar < current_ar:
+                # Need to expand height
+                target_h = int(orig_w / target_ar)
+                total_extend = target_h - orig_h
+                extend_up = min(total_extend // 2, MAX_EXTEND)
+                extend_down = min(total_extend - extend_up, MAX_EXTEND)
+        except Exception as e:
+            print(f"[Clipdrop-Expand] Could not parse aspect ratio '{aspect_ratio}': {e}, using default 25% expansion")
+            extend_left = extend_right = min(orig_w // 8, MAX_EXTEND)
+            extend_up = extend_down = min(orig_h // 8, MAX_EXTEND)
+    else:
+        # No aspect ratio: expand 25% symmetrically
+        extend_left = extend_right = min(orig_w // 8, MAX_EXTEND)
+        extend_up = extend_down = min(orig_h // 8, MAX_EXTEND)
+
+    print(f"[Clipdrop-Expand] Extending: left={extend_left} right={extend_right} up={extend_up} down={extend_down}")
+
+    ext = input_image_url.split('?')[0].rsplit('.', 1)[-1].lower()
+    mime = 'image/jpeg' if ext in ('jpg', 'jpeg') else f'image/{ext}'
+
+    endpoint = "https://clipdrop-api.co/uncrop/v1"
+    headers = {"x-api-key": api_key}
+    files = {'image_file': (f'image.{ext}', image_data, mime)}
+    data = {
+        'extend_left':  extend_left,
+        'extend_right': extend_right,
+        'extend_up':    extend_up,
+        'extend_down':  extend_down,
+    }
+
+    print(f"[Clipdrop-Expand] Sending uncrop request")
+    response = requests.post(endpoint, headers=headers, files=files, data=data, timeout=120)
+
+    if response.status_code == 402:
+        raise Exception("Clipdrop API error 402: Payment Required - credits exhausted")
+    if response.status_code == 401:
+        raise Exception("Clipdrop API error 401: Unauthorized - invalid API key")
+    if response.status_code != 200:
+        raise Exception(f"Clipdrop API error {response.status_code}: {response.text}")
+
+    result_bytes = response.content
+    print(f"[Clipdrop-Expand] Expand successful: {len(result_bytes) / (1024*1024):.2f} MB")
+    return {
+        "success": True,
+        "is_raw_bytes": True,
+        "data": result_bytes,
         "type": "image"
     }
 
@@ -3572,6 +3790,662 @@ def generate_with_frenix_image(prompt, model, aspect_ratio, api_key, input_image
         raise Exception(f"Frenix image generation failed: {str(e)}")
 
 
+def _aicc_url_to_base64(url):
+    """Download an image URL and return (base64_data, mime_type)."""
+    resp = requests.get(url, timeout=60)
+    if resp.status_code != 200:
+        raise Exception(f"Failed to download image from {url}: HTTP {resp.status_code}")
+    content_type = resp.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
+    b64 = base64.b64encode(resp.content).decode("utf-8")
+    return b64, content_type
+
+
+def generate_with_aicc(prompt, model, aspect_ratio, api_key, input_image_url=None, job_type="image", duration=5):
+    """
+    Generate image or video using AICC API.
+    Base URL: https://api.ai.cc
+    Auth: Bearer {api_key}
+
+    Image (with input):  POST /v1beta/models/{model}:generateContent  (native Gemini, multi-image support)
+    Image (text-only):   POST /v1/images/generations                  (OpenAI-compatible)
+    Video:               POST /v1/video/generations + polling          (async)
+    """
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    # ── VIDEO ────────────────────────────────────────────────────────────────
+    if job_type == "video":
+        aicc_model = AICC_VIDEO_MODELS.get(model, model)
+
+        aspect_to_size = {
+            "1:1":  "1280*720",
+            "16:9": "1280*720",
+            "9:16": "720*1280",
+            "4:3":  "1280*960",
+            "3:4":  "960*1280",
+            "3:2":  "1280*854",
+            "2:3":  "854*1280",
+        }
+        size = aspect_to_size.get(aspect_ratio, "1280*720")
+
+        payload = {
+            "model": aicc_model,
+            "input": {"prompt": prompt},
+            "parameters": {"size": size, "duration": duration},
+        }
+        if input_image_url:
+            first_url = input_image_url[0] if isinstance(input_image_url, list) else input_image_url
+            payload["input"]["img_url"] = first_url
+
+        print(f"[AICC] Video request: model={aicc_model}, size={size}, duration={duration}")
+
+        try:
+            response = requests.post(
+                "https://api.ai.cc/v1/video/generations",
+                headers=headers,
+                json=payload,
+                timeout=60,
+            )
+            print(f"[AICC] Video submit status: {response.status_code}")
+
+            if response.status_code == 401:
+                raise Exception(f"AICC error 401: invalid api key - {response.text}")
+            if response.status_code == 403:
+                raise Exception(f"AICC error 403: forbidden - {response.text}")
+            if response.status_code == 429:
+                raise Exception(f"AICC error 429: rate limit - {response.text}")
+            if response.status_code != 200:
+                raise Exception(f"AICC video error {response.status_code}: {response.text}")
+
+            result = response.json()
+            print(f"[AICC] Submit raw response: {str(result)[:500]}")
+            task_id = result.get("id") or result.get("task_id") or result.get("job_id")
+            if not task_id:
+                raise Exception(f"AICC did not return a video task ID. Response: {str(result)[:300]}")
+
+            poll_url = f"https://api.ai.cc/v1/video/generations/{task_id}"
+            for attempt in range(120):
+                time.sleep(5)
+                poll = requests.get(poll_url, headers=headers, timeout=30)
+                poll_result = poll.json()
+                if attempt < 3:
+                    print(f"[AICC] Poll raw response: {str(poll_result)[:500]}")
+                
+                # Extract status from nested data structure
+                data = poll_result.get("data", {})
+                status = (
+                    data.get("status")
+                    or poll_result.get("status")
+                    or poll_result.get("task_status")
+                    or poll_result.get("state")
+                    or poll_result.get("job_status")
+                    or ""
+                )
+                print(f"[AICC] Video poll attempt {attempt + 1}: status={status}")
+
+                # Check for completion - status can be SUCCESS or COMPLETE
+                if status.upper() in ("SUCCESS", "SUCCEEDED", "COMPLETED", "COMPLETE"):
+                    print(f"[AICC] Video SUCCESS!")
+                    
+                    # Extract video URL from nested data structure
+                    # The AICC API returns video_url in data.data.output.video_url
+                    video_url = None
+                    
+                    # Primary location: data.data.output.video_url
+                    nested_output = data.get("data", {}).get("output", {})
+                    if nested_output.get("video_url"):
+                        video_url = nested_output["video_url"]
+                        print(f"[AICC] Found video URL in data.data.output.video_url")
+                    # Fallback: sometimes it's in fail_reason field (weird API quirk)
+                    elif data.get("fail_reason") and data["fail_reason"].startswith("http"):
+                        video_url = data["fail_reason"]
+                        print(f"[AICC] Found video URL in fail_reason field")
+                    # Other possible locations
+                    elif data.get("output"):
+                        video_url = data["output"]
+                    elif poll_result.get("output"):
+                        video_url = poll_result["output"]
+                    elif poll_result.get("video_url"):
+                        video_url = poll_result["video_url"]
+                    elif poll_result.get("url"):
+                        video_url = poll_result["url"]
+                    
+                    if isinstance(video_url, list):
+                        video_url = video_url[0]
+                    
+                    if not video_url:
+                        print(f"[AICC] ERROR: Could not find video URL in response")
+                        print(f"[AICC] Full response: {json.dumps(poll_result, indent=2)}")
+                        raise Exception(f"AICC video response missing output url")
+                    
+                    print(f"[AICC] Video URL: {video_url[:100]}...")
+                    return {"success": True, "url": video_url, "type": "video"}
+
+                # Check for failure
+                if status.upper() in ("FAILURE", "FAILED", "ERROR", "CANCELLED"):
+                    fail_reason = data.get("fail_reason") or poll_result.get("error") or status
+                    raise Exception(f"AICC video job failed: {fail_reason}")
+
+            raise Exception("AICC video polling timed out after 10 minutes")
+
+        except Exception as e:
+            print(f"[AICC] Video error: {str(e)}")
+            raise Exception(f"AICC video generation failed: {str(e)}")
+
+    # ── IMAGE WITH INPUT (native Gemini endpoint — supports multi-image) ──────
+    elif input_image_url:
+        aicc_model = AICC_IMAGE_MODELS.get(model, model)
+
+        gemini_aspect = aspect_ratio if aspect_ratio in ("1:1", "3:4", "4:3", "16:9", "9:16") else "1:1"
+
+        input_urls = input_image_url if isinstance(input_image_url, list) else [input_image_url]
+        print(f"[AICC] Gemini img2img request: model={aicc_model}, aspect={gemini_aspect}, images={len(input_urls)}")
+
+        image_data_list = []
+        for idx, url in enumerate(input_urls):
+            try:
+                b64_data, mime_type = _aicc_url_to_base64(url)
+                image_data_list.append((b64_data, mime_type))
+                print(f"[AICC] Loaded reference image {idx + 1}/{len(input_urls)}: {mime_type}")
+            except Exception as e:
+                raise Exception(f"AICC failed to load reference image {idx + 1}: {str(e)}")
+
+        def _try_v1_openai():
+            """Try OpenAI-compatible /v1/chat/completions endpoint."""
+            content = []
+            for b64_data, mime_type in image_data_list:
+                content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime_type};base64,{b64_data}"}
+                })
+            content.append({"type": "text", "text": prompt})
+
+            v1_payload = {
+                "model": aicc_model,
+                "messages": [{"role": "user", "content": content}],
+                "modalities": ["image", "text"],
+            }
+            print(f"[AICC] Trying v1 OpenAI endpoint: model={aicc_model}")
+            r = requests.post(
+                "https://api.ai.cc/v1/chat/completions",
+                headers=headers,
+                json=v1_payload,
+                timeout=180,
+            )
+            print(f"[AICC] v1 OpenAI response status: {r.status_code}")
+            if r.status_code == 401:
+                raise Exception(f"AICC error 401: invalid api key - {r.text}")
+            if r.status_code == 403:
+                raise Exception(f"AICC error 403: forbidden - {r.text}")
+            if r.status_code == 429:
+                raise Exception(f"AICC error 429: rate limit - {r.text}")
+            if r.status_code != 200:
+                raise Exception(f"AICC v1 error {r.status_code}: {r.text}")
+
+            result = r.json()
+            choices = result.get("choices", [])
+            if not choices:
+                raise Exception("AICC v1 returned no choices")
+
+            msg_content = choices[0].get("message", {}).get("content", "")
+            if isinstance(msg_content, list):
+                for part in msg_content:
+                    if part.get("type") == "image_url":
+                        data_uri = part.get("image_url", {}).get("url", "")
+                        if data_uri.startswith("data:"):
+                            b64 = data_uri.split(",", 1)[1]
+                            return {"success": True, "data": b64, "type": "image", "is_base64": True}
+                    if part.get("type") == "image":
+                        b64 = part.get("data", "")
+                        if b64:
+                            return {"success": True, "data": b64, "type": "image", "is_base64": True}
+            if isinstance(msg_content, str) and msg_content.startswith("data:"):
+                b64 = msg_content.split(",", 1)[1]
+                return {"success": True, "data": b64, "type": "image", "is_base64": True}
+
+            raise Exception("AICC v1 response contained no image data")
+
+        def _try_v1beta_gemini():
+            """Try native Gemini /v1beta/models endpoint."""
+            parts = []
+            for b64_data, mime_type in image_data_list:
+                parts.append({"inlineData": {"mimeType": mime_type, "data": b64_data}})
+            parts.append({"text": prompt})
+
+            v1beta_payload = {
+                "contents": [{"role": "user", "parts": parts}],
+                "generationConfig": {
+                    "responseModalities": ["IMAGE"],
+                    "imageConfig": {"aspectRatio": gemini_aspect},
+                },
+            }
+            print(f"[AICC] Trying v1beta Gemini endpoint: model={aicc_model}")
+            r = requests.post(
+                f"https://api.ai.cc/v1beta/models/{aicc_model}:generateContent",
+                headers=headers,
+                json=v1beta_payload,
+                timeout=180,
+            )
+            print(f"[AICC] v1beta Gemini response status: {r.status_code}")
+            if r.status_code == 401:
+                raise Exception(f"AICC error 401: invalid api key - {r.text}")
+            if r.status_code == 403:
+                raise Exception(f"AICC error 403: forbidden - {r.text}")
+            if r.status_code == 429:
+                raise Exception(f"AICC error 429: rate limit - {r.text}")
+            if r.status_code != 200:
+                raise Exception(f"AICC Gemini error {r.status_code}: {r.text}")
+
+            result = r.json()
+            candidates = result.get("candidates", [])
+            if not candidates:
+                raise Exception("AICC Gemini returned no candidates")
+
+            for part in candidates[0].get("content", {}).get("parts", []):
+                inline = part.get("inlineData", {})
+                if inline.get("data"):
+                    return {"success": True, "data": inline["data"], "type": "image", "is_base64": True}
+
+            raise Exception("AICC Gemini response contained no image data")
+
+        max_img2img_retries = 2
+        img2img_retry_delay = 10
+        last_error = None
+
+        _AICC_QUOTA_MARKERS = (
+            "insufficient_user_quota",
+            "insufficient user quota",
+            "用户额度不足",
+            "quota_not_enough",
+            "quota not enough",
+            "user quota is not enough",
+        )
+
+        for img2img_attempt in range(1, max_img2img_retries + 1):
+            try:
+                try:
+                    return _try_v1beta_gemini()
+                except Exception as v1beta_err:
+                    v1beta_err_str = str(v1beta_err)
+                    if any(m in v1beta_err_str.lower() for m in _AICC_QUOTA_MARKERS):
+                        print(f"[AICC] v1beta quota exhausted (attempt {img2img_attempt}/{max_img2img_retries}) — breaking inner retry")
+                        raise
+                    print(f"[AICC] v1beta endpoint failed (attempt {img2img_attempt}/{max_img2img_retries}): {v1beta_err} — falling back to v1 OpenAI")
+                    return _try_v1_openai()
+            except Exception as e:
+                last_error = e
+                e_str = str(e)
+                print(f"[AICC] Gemini img2img error (attempt {img2img_attempt}/{max_img2img_retries}): {e_str}")
+                if any(m in e_str.lower() for m in _AICC_QUOTA_MARKERS):
+                    print(f"[AICC] Quota exhausted — stopping inner retries, triggering key rotation")
+                    break
+                if img2img_attempt < max_img2img_retries:
+                    print(f"[AICC] Retrying in {img2img_retry_delay}s...")
+                    time.sleep(img2img_retry_delay)
+
+        print(f"[AICC] All {max_img2img_retries} img2img attempts failed")
+        raise Exception(f"AICC image generation failed: {str(last_error)}")
+
+    # ── IMAGE TEXT-ONLY (OpenAI-compatible endpoint) ──────────────────────────
+    else:
+        aicc_model = AICC_IMAGE_MODELS.get(model, model)
+
+        aspect_to_size = {
+            "1:1":  "1024x1024",
+            "16:9": "1792x1024",
+            "9:16": "1024x1792",
+            "4:3":  "1344x1024",
+            "3:4":  "1024x1344",
+            "3:2":  "1536x1024",
+            "2:3":  "1024x1536",
+        }
+        size = aspect_to_size.get(aspect_ratio, "1024x1024")
+
+        payload = {
+            "model": aicc_model,
+            "prompt": prompt,
+            "size": size,
+            "n": 1,
+        }
+
+        max_t2i_retries = 5
+        t2i_retry_delay = 10
+        last_t2i_error = None
+
+        for t2i_attempt in range(1, max_t2i_retries + 1):
+            print(f"[AICC] Image text-to-image request (attempt {t2i_attempt}/{max_t2i_retries}): model={aicc_model}, size={size}")
+            try:
+                response = requests.post(
+                    "https://api.ai.cc/v1/images/generations",
+                    headers=headers,
+                    json=payload,
+                    timeout=120,
+                )
+                print(f"[AICC] Image response status: {response.status_code}")
+
+                if response.status_code == 401:
+                    raise Exception(f"AICC error 401: invalid api key - {response.text}")
+                if response.status_code == 403:
+                    raise Exception(f"AICC error 403: forbidden - {response.text}")
+                if response.status_code == 429:
+                    raise Exception(f"AICC error 429: rate limit - {response.text}")
+                if response.status_code != 200:
+                    raise Exception(f"AICC image error {response.status_code}: {response.text}")
+
+                result = response.json()
+                data = result.get("data", [])
+                if not data:
+                    raise Exception("AICC returned no image data")
+
+                item = data[0]
+                if item.get("b64_json"):
+                    return {"success": True, "data": item["b64_json"], "type": "image", "is_base64": True}
+                elif item.get("url"):
+                    return {"success": True, "url": item["url"], "type": "image"}
+                else:
+                    raise Exception("AICC image response missing url and b64_json")
+
+            except Exception as e:
+                last_t2i_error = e
+                e_str = str(e)
+                print(f"[AICC] Image error (attempt {t2i_attempt}/{max_t2i_retries}): {e_str}")
+                if any(m in e_str.lower() for m in (
+                    "insufficient_user_quota", "insufficient user quota", "用户额度不足",
+                    "quota_not_enough", "quota not enough", "user quota is not enough",
+                )):
+                    print(f"[AICC] Quota exhausted — stopping inner retries, triggering key rotation")
+                    break
+                if t2i_attempt < max_t2i_retries:
+                    print(f"[AICC] Retrying in {t2i_retry_delay}s...")
+                    time.sleep(t2i_retry_delay)
+
+        print(f"[AICC] All {max_t2i_retries} text-to-image attempts failed")
+        raise Exception(f"AICC image generation failed: {str(last_t2i_error)}")
+
+
+def generate_with_felo(prompt, model, aspect_ratio, api_key, input_image_url=None, job_type="image", duration=5):
+    """
+    Generate or edit an image using Felo AI (openapi.felo.ai).
+
+    Pipeline:
+      1. POST /v2/conversations  → stream_key + live_doc_short_id
+      2. Read SSE stream briefly (server closes it early; generation is async)
+      3. Poll GET /v2/livedocs/{id}/resources until resource_type=image, status=completed
+      4. GET /v2/livedocs/{id}/resources/{item_id}/download → 302 → S3 pre-signed URL
+      5. Download raw PNG bytes from S3 and return as base64
+
+    Text-to-image: prompt only, no images[] field.
+    Image editing:  input_image_url downloaded, resized to 512px, sent as base64 data URL in images[].
+
+    DNS note: openapi.felo.ai and *.amazonaws.com can fail to resolve on some hosts.
+    This function resolves both via Google DNS-over-HTTPS and caches the IPs.
+    """
+    import socket as _socket
+
+    felo_model = FELO_MODELS.get(model, model)
+    BASE        = "https://openapi.felo.ai"
+    FELO_HDRS   = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    SSE_HDRS    = {"Authorization": f"Bearer {api_key}", "Accept": "text/event-stream"}
+
+    # ── DNS patch (Google DoH) ────────────────────────────────────────────────
+    _felo_dns: dict = {}
+    _orig_gai = _socket.getaddrinfo
+
+    def _doh_resolve(host):
+        try:
+            r = requests.get(
+                "https://dns.google/resolve",
+                params={"name": host, "type": "A"},
+                timeout=5,
+            )
+            for ans in r.json().get("Answer", []):
+                if ans.get("type") == 1:
+                    return ans["data"]
+        except Exception:
+            pass
+        return None
+
+    def _patched_gai(host, port, *args, **kwargs):
+        if host in ("openapi.felo.ai",) or host.endswith(".amazonaws.com"):
+            if host not in _felo_dns:
+                ip = _doh_resolve(host)
+                if ip:
+                    _felo_dns[host] = ip
+            if host in _felo_dns:
+                host = _felo_dns[host]
+        return _orig_gai(host, port, *args, **kwargs)
+
+    _socket.getaddrinfo = _patched_gai
+
+    try:
+        # ── Pre-resolve openapi.felo.ai via DoH ───────────────────────────────
+        ip = _doh_resolve("openapi.felo.ai")
+        if ip:
+            _felo_dns["openapi.felo.ai"] = ip
+            print(f"[Felo] Resolved openapi.felo.ai → {ip}")
+
+        # ── Safe helpers ─────────────────────────────────────────────────────
+        def _felo_get(url, stream=False, allow_redirects=True, timeout=30, retries=4):
+            hdrs = SSE_HDRS if stream else FELO_HDRS
+            for attempt in range(retries):
+                try:
+                    return requests.get(url, headers=hdrs, stream=stream,
+                                        allow_redirects=allow_redirects, timeout=timeout)
+                except Exception as e:
+                    print(f"[Felo] GET retry {attempt+1}/{retries}: {type(e).__name__}")
+                    time.sleep(3)
+            return None
+
+        def _felo_post(url, payload, retries=4):
+            for attempt in range(retries):
+                try:
+                    return requests.post(url, headers=FELO_HDRS, json=payload, timeout=30)
+                except Exception as e:
+                    print(f"[Felo] POST retry {attempt+1}/{retries}: {type(e).__name__}")
+                    time.sleep(3)
+            return None
+
+        # ── Build query ───────────────────────────────────────────────────────
+        # NOTE: Sending images[] as base64 causes Felo to enter visual Q&A mode
+        # (no image_generation tool fires). For editing, embed the source URL
+        # directly in the query text so nano-banana-2 generates a new image.
+        if input_image_url:
+            first_url = input_image_url[0] if isinstance(input_image_url, list) else input_image_url
+            query = (
+                f"Generate a new image based on this reference image {first_url} "
+                f"with the following changes: {prompt}. "
+                f"Output must be a fully generated image."
+            )
+            print(f"[Felo] Edit mode — reference URL in query (no images[] attachment)")
+        else:
+            query = f"Generate an image: {prompt}"
+
+        payload = {
+            "query": query,
+            "model": felo_model,
+            "tools": ["image_generation"],
+        }
+
+        # ── Step 1: Create conversation ───────────────────────────────────────
+        print(f"[Felo] POST /v2/conversations model={felo_model}")
+        r = _felo_post(f"{BASE}/v2/conversations", payload)
+        if not r or r.status_code not in (200, 201):
+            err = getattr(r, "text", "no response")[:300]
+            if r and r.status_code in (401, 403):
+                raise Exception(f"Felo error {r.status_code}: invalid api key - {err}")
+            if r and r.status_code == 429:
+                raise Exception(f"Felo error 429: rate limit - {err}")
+            raise Exception(f"Felo conversation failed {getattr(r,'status_code','?')}: {err}")
+
+        resp_data   = r.json()
+        data        = resp_data.get("data", {})
+        stream_key  = data.get("stream_key", "")
+        live_doc_id = data.get("live_doc_short_id", "")
+        thread_id   = data.get("thread_short_id", "")
+        print(f"[Felo] stream_key={stream_key}  live_doc={live_doc_id}  thread={thread_id}")
+        print(f"[Felo] Conversation response keys: {list(data.keys())}")
+
+        # ── Step 2: Read SSE (wait for image_generation tool to fire) ──────────
+        import json as _json
+        sse_got_image_tool = False
+        if stream_key:
+            try:
+                sse = _felo_get(f"{BASE}/v2/conversations/stream/{stream_key}",
+                                stream=True, timeout=90)
+                if sse and sse.status_code == 200:
+                    print(f"[Felo] SSE connected, reading for up to 80s...")
+                    deadline = time.time() + 80
+                    for raw in sse.iter_lines(decode_unicode=True):
+                        if time.time() > deadline:
+                            print(f"[Felo] SSE deadline reached")
+                            break
+                        if not raw:        # blank line = SSE event separator; skip
+                            continue
+                        if raw.startswith("data:"):
+                            try:
+                                env = _json.loads(raw[5:].strip())
+                                if env.get("is_complete"):
+                                    print(f"[Felo] SSE is_complete=True")
+                                    break
+                                content = env.get("content", "")
+                                if content:
+                                    inner = _json.loads(content)
+                                    d = inner.get("data", {})
+                                    msg_type = inner.get("type", "")
+                                    if msg_type == "processing":
+                                        print(f"[Felo] SSE processing: {d.get('message','')}")
+                                    if "tools" in d:
+                                        for tool in d["tools"]:
+                                            tn = tool.get("tool_name") or tool.get("name", "")
+                                            st = tool.get("status", "")
+                                            print(f"[Felo] SSE tool={tn} status={st}")
+                                            if tn == "image_generation" and st in ("generating", "initialized"):
+                                                sse_got_image_tool = True
+                                    # Check for image URL in SSE content directly
+                                    if "image_url" in str(d) or "url" in str(d):
+                                        print(f"[Felo] SSE data snippet: {str(d)[:200]}")
+                            except Exception:
+                                pass
+                        elif raw.startswith("event:") or raw.startswith("id:"):
+                            print(f"[Felo] SSE meta: {raw}")
+                else:
+                    sc = getattr(sse, 'status_code', 'none')
+                    print(f"[Felo] SSE unavailable (status={sc})")
+                if sse:
+                    sse.close()
+            except Exception as e:
+                print(f"[Felo] SSE error: {type(e).__name__}: {e}")
+        print(f"[Felo] SSE image_tool_fired={sse_got_image_tool}")
+
+        # ── Step 3: Poll LiveDoc for completed image ──────────────────────────
+        print(f"[Felo] Polling LiveDoc {live_doc_id} ...")
+        item_id = None
+
+        def _extract_items(resp_json):
+            """Try multiple field paths Felo may use for resource lists."""
+            data = resp_json.get("data", {})
+            if isinstance(data, list):
+                return data
+            for key in ("items", "resources", "list", "results"):
+                val = data.get(key)
+                if isinstance(val, list):
+                    return val
+            return []
+
+        def _find_item_id(items):
+            for item in items:
+                rtype  = item.get("resource_type") or item.get("type", "")
+                status = item.get("status", "")
+                iid    = item.get("id", "")
+                print(f"[Felo]   item type={rtype} status={status} id={iid}")
+                if (rtype in ("image", "img", "generated_image")
+                        and status in ("completed", "done", "success", "finished")
+                        and iid):
+                    print(f"[Felo] Image ready: {item.get('title','')} item_id={iid}")
+                    return iid
+                if status in ("completed", "done", "success") and iid:
+                    print(f"[Felo] Item ready (type={rtype}): item_id={iid}")
+                    return iid
+            return None
+
+        for attempt in range(60):           # up to ~5 minutes
+            time.sleep(5)
+
+            # Poll livedoc resources
+            poll = _felo_get(f"{BASE}/v2/livedocs/{live_doc_id}/resources")
+            if poll:
+                try:
+                    resp_json = poll.json()
+                    items = _extract_items(resp_json)
+                    if attempt == 0:
+                        print(f"[Felo] Poll 1 livedoc raw: {str(resp_json)[:400]}")
+                    print(f"[Felo] Poll {attempt+1}: {len(items)} livedoc item(s)")
+                    found = _find_item_id(items)
+                    if found:
+                        item_id = found
+                        break
+                except Exception:
+                    pass
+
+            # Fallback: poll thread resources and messages every 5 attempts
+            if not item_id and thread_id and attempt % 5 == 0:
+                for t_endpoint in (
+                    f"{BASE}/v2/threads/{thread_id}/resources",
+                    f"{BASE}/v2/livedocs/{thread_id}/resources",
+                ):
+                    t_poll = _felo_get(t_endpoint)
+                    if t_poll:
+                        try:
+                            t_json = t_poll.json()
+                            t_items = _extract_items(t_json)
+                            if attempt == 0:
+                                print(f"[Felo] Poll 1 thread raw ({t_endpoint.split('/')[-2]}): {str(t_json)[:300]}")
+                            if t_items:
+                                print(f"[Felo] Thread poll {attempt+1}: {len(t_items)} item(s) from {t_endpoint}")
+                                found = _find_item_id(t_items)
+                                if found:
+                                    item_id = found
+                                    live_doc_id = thread_id
+                                    break
+                        except Exception:
+                            pass
+                if item_id:
+                    break
+
+        if not item_id:
+            raise Exception("Felo image generation failed: no completed image resource found after ~5 minutes of polling")
+
+        # ── Step 4: Get S3 pre-signed download URL ────────────────────────────
+        dl_url  = f"{BASE}/v2/livedocs/{live_doc_id}/resources/{item_id}/download"
+        dl_resp = _felo_get(dl_url, allow_redirects=False, timeout=15)
+        if not dl_resp:
+            raise Exception("Felo /download request failed")
+        if dl_resp.status_code == 302:
+            s3_url = dl_resp.headers.get("location", "")
+        elif dl_resp.status_code == 200:
+            s3_url = dl_resp.url
+        else:
+            raise Exception(f"Felo /download returned {dl_resp.status_code}: {dl_resp.text[:200]}")
+        if not s3_url:
+            raise Exception("Felo /download returned no redirect URL")
+
+        print(f"[Felo] Downloading from S3 ...")
+        img_resp = requests.get(s3_url, timeout=60)
+        if img_resp.status_code != 200 or len(img_resp.content) < 1000:
+            raise Exception(f"Felo S3 download failed: {img_resp.status_code}")
+
+        b64_result = base64.b64encode(img_resp.content).decode()
+        print(f"[Felo] Done — {len(img_resp.content)//1024} KB image")
+        return {"success": True, "data": b64_result, "type": "image", "is_base64": True}
+
+    except Exception as e:
+        raise Exception(f"Felo image generation failed: {str(e)}")
+    finally:
+        _socket.getaddrinfo = _orig_gai
+
+
 def generate(prompt, model, aspect_ratio, api_key, provider_key=None, input_image_url=None, job_type="image", duration=5, **kwargs):
     endpoint_type = get_endpoint_type(provider_key, model)
     
@@ -3761,6 +4635,26 @@ def generate(prompt, model, aspect_ratio, api_key, provider_key=None, input_imag
             job_type=job_type,
             duration=duration
         )
+    elif endpoint_type == "aicc":
+        return generate_with_aicc(
+            prompt=prompt,
+            model=model,
+            aspect_ratio=aspect_ratio,
+            api_key=api_key,
+            input_image_url=input_image_url,
+            job_type=job_type,
+            duration=duration
+        )
+    elif endpoint_type == "felo":
+        return generate_with_felo(
+            prompt=prompt,
+            model=model,
+            aspect_ratio=aspect_ratio,
+            api_key=api_key,
+            input_image_url=input_image_url,
+            job_type=job_type,
+            duration=duration
+        )
     else:
         raise Exception(f"Unsupported endpoint type: {endpoint_type}")
 
@@ -3792,10 +4686,11 @@ class EndpointManager:
         """
         import asyncio
         from provider_api_keys import get_api_key_for_job
-        from api_key_rotation import handle_api_key_rotation, should_rotate_key
+        from api_key_rotation import handle_api_key_rotation, handle_roundrobin_rotation, should_rotate_key, NO_DELETE_ROTATE_PROVIDERS
         
         print(f"🔍 [EndpointManager] generate_image - provider_key: {provider_key}, model: {model}")
         
+        use_roundrobin = provider_key in NO_DELETE_ROTATE_PROVIDERS
         max_rotation_attempts = 5
         attempt = 0
         
@@ -3837,12 +4732,21 @@ class EndpointManager:
                 if should_rotate_key(error_message, provider_key):
                     print(f"[EndpointManager] Error requires key rotation, attempting...")
                     
-                    rotation_success, next_key = handle_api_key_rotation(
-                        api_key_id,
-                        provider_key,
-                        error_message,
-                        job_id=job_id or f"workflow-{model}"
-                    )
+                    if use_roundrobin:
+                        print(f"[EndpointManager] Provider '{provider_key}' uses roundrobin (no key deletion)")
+                        rotation_success, next_key = handle_roundrobin_rotation(
+                            provider_key,
+                            error_message,
+                            job_id=job_id or f"workflow-{model}",
+                            current_api_key_id=api_key_id
+                        )
+                    else:
+                        rotation_success, next_key = handle_api_key_rotation(
+                            api_key_id,
+                            provider_key,
+                            error_message,
+                            job_id=job_id or f"workflow-{model}"
+                        )
                     
                     if rotation_success and next_key:
                         print(f"[EndpointManager] Rotation successful, retrying with new key...")

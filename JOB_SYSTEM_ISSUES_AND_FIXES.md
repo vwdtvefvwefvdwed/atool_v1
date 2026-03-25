@@ -1030,3 +1030,750 @@ if _status_check.data:
 | **Image** | Yes — UPDATE channel was the race source | `_deferred_retry` + `handle_api_key_insertion` + 10-min sweep ✓ |
 | **Video** | Yes — same code path as image | Same as image ✓ |
 | **Workflow** | No — inner guard at line 2027 already skipped UPDATE events for workflows | `workflow_retry_manager` 2-min sweep + `handle_api_key_insertion` ✓ |
+
+---
+
+---
+
+# Proposed Enhancement — Model-Conflict-Based Parallel Scheduling
+
+## Background & Motivation
+
+The coordinator currently uses **global serialization**: exactly one job runs at a time. Any new job that arrives while another is running is blocked — regardless of whether the two jobs share any models or providers.
+
+This was a deliberate safety choice (prevents global state overwrite), but it is too conservative. In practice the workflow job set and the normal image/video job set use **completely different providers**:
+
+| Job type | Models / Providers used |
+|---|---|
+| All 9 workflows | `gemini-25-flash-aicc` (`vision-aicc`) + `clipdrop-upscale` (`vision-clipdrop`) |
+| Normal image/video | `sdxl-lightning-xeven`, `flux`, `nova`, `atlas`, `wan22`, `kling`, `hailuo`, etc. (all different providers) |
+
+There is **zero model overlap** between a running workflow and a typical normal image/video job. With the current design, a user submitting an image generation request while another user's workflow is running must wait 60–90 seconds for the workflow to finish — even though the two jobs would never interfere.
+
+The idea: replace global serialization with **model-conflict-based scheduling**. Two jobs can run simultaneously if and only if their required model/provider sets do not overlap.
+
+---
+
+## The Core Logic Change
+
+### Current (`can_start_job`)
+```
+If ANY job is active → block
+```
+
+### Proposed
+```
+If the NEW job's models overlap with ANY active job's models → block (name the conflicting job)
+If no overlap → allow (run in parallel)
+```
+
+This is already half-built. `has_model_conflict()` exists in the coordinator but is unused — the current code skips it and falls through to the blanket block. The `active_models` list is already stored in `job_queue_state`.
+
+---
+
+## The Problem: Single-Slot DB State
+
+`job_queue_state` (Worker1 DB) stores ONE active job:
+```
+active_job_id    → uuid
+active_job_type  → text
+active_models    → jsonb   (array of model names)
+```
+
+With parallel execution allowed, multiple jobs can be active simultaneously. The DB state must store ALL active jobs, not just one.
+
+---
+
+## Plan
+
+### Step 1 — DB migration: add `active_jobs` JSONB column
+
+Add a new column to `job_queue_state` in the Worker1 DB:
+
+```sql
+ALTER TABLE job_queue_state
+ADD COLUMN active_jobs JSONB NOT NULL DEFAULT '[]'::jsonb;
+```
+
+Schema of each entry in the array:
+```json
+{
+  "job_id": "uuid",
+  "job_type": "workflow | image | video",
+  "models": ["model-name-1", "model-name-2"]
+}
+```
+
+Keep the existing `active_job_id` / `active_job_type` / `active_models` columns during the transition (for backward compatibility with any existing monitoring/ops tooling). After the new system is stable those columns can be dropped.
+
+---
+
+### Step 2 — Change `get_active_job_state()` to read `active_jobs` array
+
+```python
+# CURRENT
+state = {
+    "active_job_id": ...,
+    "active_job_type": ...,
+    "active_models": [...]
+}
+
+# PROPOSED
+state = {
+    "active_jobs": [
+        {"job_id": "...", "job_type": "workflow", "models": ["gemini-25-flash-aicc", "clipdrop-upscale"]},
+        ...
+    ]
+}
+```
+
+The in-memory cache (`_active_job_cache`) becomes:
+```python
+_active_job_cache = {
+    "active_jobs": []   # list of {job_id, job_type, models}
+}
+```
+
+---
+
+### Step 3 — Change `can_start_job()` to check model conflict
+
+```python
+def can_start_job(self, job_id, job_type, required_models):
+    state = self.get_active_job_state()
+    active_jobs = state.get('active_jobs', []) if state else []
+
+    # Self-reservation: job already pre-claimed
+    if any(j['job_id'] == job_id for j in active_jobs):
+        return {"can_start": True, "reason": "Job already reserved", ...}
+
+    # No active jobs — start immediately
+    if not active_jobs:
+        return {"can_start": True, "reason": "No active jobs", ...}
+
+    # Collect all models currently in use
+    active_models_union = set()
+    for j in active_jobs:
+        active_models_union.update(j.get('models', []))
+
+    # Check conflict
+    new_set = set(required_models)
+    conflict = new_set & active_models_union
+
+    if conflict:
+        # Find which specific job owns the conflicting models (for blocked_by_job_id)
+        for j in active_jobs:
+            if new_set & set(j.get('models', [])):
+                blocking_job_id = j['job_id']
+                blocking_job_type = j['job_type']
+                break
+        return {
+            "can_start": False,
+            "reason": f"Model conflict with {blocking_job_type} job {blocking_job_id}: {conflict}",
+            "blocked_by": blocking_job_id,
+            "conflict_models": list(conflict)
+        }
+
+    # No conflict — allow parallel execution
+    return {"can_start": True, "reason": "No model conflict with active jobs", ...}
+```
+
+---
+
+### Step 4 — Change `set_active_job()` to APPEND (not replace)
+
+```python
+# CURRENT: replaces the single active-job slot
+UPDATE job_queue_state SET active_job_id=?, active_job_type=?, active_models=? WHERE id=1
+
+# PROPOSED: appends to the active_jobs array
+UPDATE job_queue_state
+SET active_jobs = active_jobs || '[{"job_id":?, "job_type":?, "models":?}]'::jsonb
+WHERE id=1
+```
+
+In Python (using Supabase JS-style client):
+```python
+# Read current, append, write back — inside _coordinator_lock
+current = self.get_active_job_state()
+active_jobs = current.get('active_jobs', []) if current else []
+active_jobs.append({"job_id": job_id, "job_type": job_type, "models": models})
+self.supabase.table('job_queue_state').update({
+    'active_jobs': active_jobs,
+    'last_updated': datetime.utcnow().isoformat()
+}).eq('id', 1).execute()
+```
+
+This read-modify-write is safe because it executes inside `_coordinator_lock`.
+
+**Cross-process safety note**: `app.py` and `job_worker_realtime.py` are separate processes. `_coordinator_lock` only protects intra-process concurrency. For cross-process atomic writes, the safest approach is to use a Supabase RPC (stored procedure) that does the array append atomically:
+
+```sql
+CREATE OR REPLACE FUNCTION append_active_job(p_job_id text, p_job_type text, p_models jsonb)
+RETURNS void AS $$
+BEGIN
+  UPDATE job_queue_state
+  SET active_jobs = active_jobs || jsonb_build_array(
+      jsonb_build_object('job_id', p_job_id, 'job_type', p_job_type, 'models', p_models)
+  )
+  WHERE id = 1;
+END;
+$$ LANGUAGE plpgsql;
+```
+
+Called as: `self.supabase.rpc('append_active_job', {...}).execute()`
+
+---
+
+### Step 5 — Change `clear_active_job()` to REMOVE by `job_id`
+
+```python
+# CURRENT: wipes the single active-job slot entirely
+# PROPOSED: removes only the completed job from the array
+
+# Read current array
+current = self.get_active_job_state()
+active_jobs = [j for j in current.get('active_jobs', []) if j['job_id'] != job_id]
+
+self.supabase.table('job_queue_state').update({
+    'active_jobs': active_jobs,
+    'last_updated': datetime.utcnow().isoformat()
+}).eq('id', 1).execute()
+```
+
+Corresponding Supabase RPC for cross-process atomicity:
+```sql
+CREATE OR REPLACE FUNCTION remove_active_job(p_job_id text)
+RETURNS void AS $$
+BEGIN
+  UPDATE job_queue_state
+  SET active_jobs = (
+    SELECT jsonb_agg(elem)
+    FROM jsonb_array_elements(active_jobs) AS elem
+    WHERE elem->>'job_id' != p_job_id
+  )
+  WHERE id = 1;
+END;
+$$ LANGUAGE plpgsql;
+```
+
+---
+
+### Step 6 — Change `process_next_queued_job()` to trigger ALL non-conflicting jobs
+
+Currently it finds the FIRST eligible queued job and returns. With parallel execution, after a job completes there may be multiple queued jobs that can now start (they each conflict with the job that just finished, but not with each other or with any remaining active job).
+
+```python
+def process_next_queued_job(self):
+    # Get all blocked jobs (ordered by queued_at FIFO)
+    queued_jobs = self.main_supabase.table('jobs')...
+
+    if not queued_jobs:
+        return None
+
+    # Get currently active models (after the completing job has been removed)
+    state = self.get_active_job_state()
+    active_jobs = state.get('active_jobs', []) if state else []
+    active_models_union = set()
+    for j in active_jobs:
+        active_models_union.update(j.get('models', []))
+
+    triggered = []
+    reserved_models = set(active_models_union)  # grows as we pre-claim slots below
+
+    for job in queued_jobs:
+        job_id = job.get('job_id')
+        required = set(job.get('required_models') or [self.get_job_model(job)])
+
+        if required & reserved_models:
+            # Would conflict with something already active or already pre-claimed this cycle
+            continue
+
+        # Pre-claim the slot — appends to active_jobs
+        start_result = self.on_job_start(job_id, job.get('job_type', 'image'), list(required))
+        if start_result['allowed']:
+            reserved_models |= required   # prevent next iteration from double-booking same models
+            self._trigger_job_processing(job)
+            triggered.append(job_id)
+
+    return triggered if triggered else None
+```
+
+---
+
+### Step 7 — Update `validate_job_queue_state_on_startup()` for multi-slot state
+
+Currently clears the single active slot. Must now clear all entries from `active_jobs`:
+
+```python
+# CURRENT
+coordinator.clear_active_job()
+
+# PROPOSED
+# Reset entire active_jobs array
+self.supabase.table('job_queue_state').update({
+    'active_jobs': [],
+    'active_job_id': None,   # keep old columns null for compat
+    'active_job_type': None,
+    'active_models': [],
+    'last_updated': datetime.utcnow().isoformat()
+}).eq('id', 1).execute()
+```
+
+---
+
+## Files Changed
+
+| File | Change |
+|------|--------|
+| Worker1 DB migration | Add `active_jobs JSONB DEFAULT '[]'` column to `job_queue_state` |
+| Worker1 DB migration | Add `append_active_job(job_id, job_type, models)` RPC |
+| Worker1 DB migration | Add `remove_active_job(job_id)` RPC |
+| `backend/job_coordinator.py` | `get_active_job_state()` — read `active_jobs` array into cache |
+| `backend/job_coordinator.py` | `set_active_job()` — append to `active_jobs` via RPC |
+| `backend/job_coordinator.py` | `clear_active_job(job_id)` — add `job_id` param; remove from array via RPC |
+| `backend/job_coordinator.py` | `can_start_job()` — build union of active models; check conflict; name specific blocker |
+| `backend/job_coordinator.py` | `process_next_queued_job()` — trigger ALL non-conflicting queued jobs in one pass |
+| `backend/job_coordinator.py` | `on_job_complete(job_id, ...)` — pass `job_id` to `clear_active_job()` |
+| `backend/job_coordinator.py` | `validate_job_queue_state_on_startup()` — reset `active_jobs = []` |
+| `backend/workflow_manager.py` | Pass `required_models` to `on_job_complete()` if needed for validation |
+
+---
+
+## New Risks & Mitigations
+
+| Risk | Scenario | Mitigation |
+|------|----------|------------|
+| **Cross-process race on `active_jobs` append** | app.py and worker both call `set_active_job()` within milliseconds → read-modify-write collision → one job's entry lost | Use DB-level atomic RPC (`append_active_job` stored proc) instead of Python read-modify-write |
+| **`process_next_queued_job()` double-trigger** | Two jobs complete nearly simultaneously → both call `process_next_queued_job()` → both see the same queued job as eligible → it starts twice | Already mitigated: both calls hold `_coordinator_lock`. The second call sees `active_jobs` already contains the pre-claimed job and the self-reservation check allows it through without re-claiming. |
+| **Workflow uses same model as normal job in future** | A new workflow added later uses `sdxl-lightning-xeven` — an operator adds it expecting it to block image jobs, but forgets about this system | The model-conflict check handles it automatically — the conflict check compares exact model names. No extra risk if `required_models` is populated correctly in both configs. |
+| **`blocked_by_job_id` points to a job that is one of many actives** | A blocked job could be blocked by job A, but job A completes while job B (also conflicting) is still running | `process_next_queued_job()` checks against the current `active_jobs` union — it will correctly NOT unblock the job while job B is still active. The `blocked_by_job_id` value is just informational (for UI display); the coordinator doesn't rely on it for scheduling logic. |
+| **Startup clears `active_jobs` while a workflow is mid-execution** | Worker restarts while app.py is still running a workflow → `validate_job_queue_state_on_startup()` clears `active_jobs` → new normal job starts → both run, but workflow's models are now untracked | This is acceptable — the workflow in app.py already has its own execution guard in `base_workflow.py` (per-step status checks). The real risk is a new workflow starting alongside the old one and conflicting. Mitigation: startup validation should check for `status=running` workflow jobs in the main DB and re-populate `active_jobs` from them before clearing stale entries. |
+
+---
+
+## Interaction with Existing Issues
+
+| Issue # | Interaction |
+|---------|-------------|
+| **#3** (pre-claim race) | Pre-claim logic still needed, unchanged — but now appends to array rather than setting a single slot |
+| **#11** (duplicate `started` log) | Self-reservation check still valid — detect pre-claim by searching `active_jobs` for `job_id` match |
+| **#17** (UPDATE event double-execution) | Unchanged — workflow UPDATE events still skipped in worker |
+| **#21** (UPDATE channel removed) | Unchanged — no new UPDATE channel introduced |
+| **Issue fixed 2026-03-25** (wrong DB for `jobs` table) | Unchanged — `main_supabase` for `jobs` table, `self.supabase` for `job_queue_state` |
+
+---
+
+## Expected Real-World Impact
+
+Given current workflow model set (`vision-aicc` + `vision-clipdrop`) vs normal job providers (all different):
+
+- **Before**: workflow running (60–90s) → ALL normal jobs wait queued → user sees "pending" for entire workflow duration
+- **After**: workflow running → normal image/video jobs start immediately → only a 2nd workflow or a job using `vision-aicc`/`vision-clipdrop` is queued
+
+In the current provider setup, **100% of workflow + normal job combinations would pass the conflict check** and run in parallel. Queuing only occurs between two concurrent workflows or two jobs on the same provider.
+
+---
+
+# Implemented Fixes — Parallel Coordinator Rewrite (2026-03-25)
+
+The enhancement above was implemented. The following issues were discovered and fixed during the full implementation.
+
+---
+
+## Issue #22 — CRITICAL: `JobCoordinator` used Worker1 DB client for `jobs` table — all `blocked_by_job_id` writes were silent no-ops
+
+**File**: `job_coordinator.py` → `mark_job_queued()`, `clear_job_queue_info()`, `process_next_queued_job()`
+
+### Root Cause
+
+```python
+# BEFORE (broken) — __init__
+self.supabase = get_worker1_client()   # Worker1 DB
+# ...
+# mark_job_queued writes blocked_by_job_id
+self.supabase.table('jobs').update({...}).eq('job_id', job_id).execute()
+#                  ^^^^ 'jobs' lives in MAIN DB — Worker1 has no 'jobs' table
+```
+
+`get_worker1_client()` returns a Supabase client pointed at Worker1 (`gmhpbeqvqpuoctaqgnum`), which holds `job_queue_state`, `job_queue_log`, and `provider_api_keys`. The `jobs` table is in the **main** Supabase database (`gtgnwrwbcxvasgetfzby`).
+
+Every call that wrote `blocked_by_job_id`, `queued_at`, or `required_models` to the `jobs` table silently wrote to a non-existent table in Worker1 — Supabase RLS returns no error for cross-DB mismatches, the rows just don't exist.
+
+`process_next_queued_job()` queried the Worker1 `jobs` table for `blocked_by_job_id IS NOT NULL` — always empty — so blocked jobs were **never unblocked**. This is the primary cause of the original reported bug: "blocked jobs stuck forever after workflow completes."
+
+### Impact
+
+- `blocked_by_job_id` written by `mark_job_queued()` never persisted → DB stays at `blocked_by_job_id=NULL`
+- `process_next_queued_job()` query returned zero rows → `"No queued jobs found"` → no jobs ever triggered after a workflow finishes
+- Normal jobs blocked by a running workflow stayed `pending` until a worker restart
+- `queued_at` timestamps never written → FIFO ordering meaningless
+
+### Fix
+
+```python
+# AFTER (fixed) — __init__
+from supabase_client import supabase as _main_supabase
+self.main_supabase = _main_supabase   # main DB — for 'jobs' table
+self.supabase = get_worker1_client()  # Worker1 DB — for 'job_queue_state', 'job_queue_log'
+
+# All jobs-table operations now use self.main_supabase
+self.main_supabase.table('jobs').update({...}).eq('job_id', job_id).execute()
+```
+
+`self.supabase` (Worker1) is used exclusively for `job_queue_state` and `job_queue_log`. `self.main_supabase` is used for all `jobs` table reads/writes.
+
+---
+
+## Issue #23 — CRITICAL: `threading.RLock` provides no cross-process atomicity — two processes can both claim coordinator slot simultaneously
+
+**File**: `job_coordinator.py` → `on_job_start()`, `on_job_complete()`
+
+### Root Cause
+
+```python
+# BEFORE (broken)
+self._coordinator_lock = threading.RLock()
+
+def on_job_start(self, job_id, job_type, models):
+    with self._coordinator_lock:
+        state = self.get_active_job_state()  # DB read
+        # ... check + decide ...
+        self.set_active_job(job_id, ...)     # DB write
+```
+
+`threading.RLock` is an **intra-process** mutex. It protects concurrent threads within `app.py` OR within `job_worker_realtime.py` — but these are two separate OS processes with separate memory spaces. There is zero synchronization between them.
+
+**Race window**: `app.py` executes `on_job_start()` for a workflow. Simultaneously, `job_worker_realtime.py` executes `on_job_start()` for a normal job. Both read `active_job_id = NULL` from DB. Both decide "no active job — allowed". Both write their job as active. The DB write is a simple `UPDATE SET active_job_id=?` — the second write overwrites the first. Now one job's slot is silently lost from the coordinator state.
+
+### Impact
+
+- Two jobs run simultaneously even when their models conflict
+- The overwritten job's slot is never in `job_queue_state` → `on_job_complete()` for that job calls `process_next_queued_job()` which sees an empty or wrong active state → may trigger jobs at wrong time
+- Extremely hard to reproduce in development (single process) but consistently present in production (two processes on separate dynos/containers)
+
+### Fix
+
+Replace Python-level locking with a PostgreSQL `SELECT FOR UPDATE` stored procedure. The DB row-level lock is the only synchronization primitive that is truly atomic across multiple OS processes:
+
+```sql
+-- try_claim_coordinator_slot: atomic check + claim in one transaction
+SELECT * FROM job_queue_state WHERE id = 1 FOR UPDATE;
+-- check for self-reservation
+-- check for model conflicts
+-- append new slot to active_jobs
+-- commit → lock released
+```
+
+Python coordinator calls `try_claim_coordinator_slot(job_id, job_type, models)` RPC. The entire check+write is one atomic DB transaction. Any concurrent call from any process blocks on `FOR UPDATE` until the transaction commits.
+
+---
+
+## Issue #24 — HIGH: `on_job_complete()` called from `finally` even when coordinator slot was never claimed
+
+**File**: `workflow_manager.py` → `execute_workflow()`, `resume_workflow()`
+
+### Root Cause
+
+```python
+# BEFORE (broken)
+try:
+    start_result = coordinator.on_job_start(job_id, "workflow", required_models)
+    if not start_result['allowed']:
+        raise RuntimeError("Workflow queued: ...")  # caught by except, re-raised
+    ...
+except Exception as e:
+    raise
+finally:
+    coordinator.on_job_complete(job_id, "workflow")  # ← always fires, even if start was not allowed
+```
+
+When `on_job_start()` returns `allowed=False` (job was blocked), the code raises `RuntimeError`. The `finally` block fires unconditionally and calls `on_job_complete()`. This triggers `release_slot(job_id)` (no-op — slot was never claimed) and then `process_next_queued_job()`. Calling `process_next_queued_job()` spuriously is harmless most of the time, but:
+
+1. It causes a DB round-trip on every coordinator block event
+2. It can trigger a queued job prematurely if the blocking job happens to complete at the exact same moment
+3. Log pollution: "Job X completed" log line for a job that never started
+
+### Impact
+
+- Every blocked workflow emits a spurious `on_job_complete` + `process_next_queued_job` cycle
+- In high-concurrency scenarios, the spurious trigger can race with the legitimate `on_job_complete` from the running job → two concurrent `process_next_queued_job` calls
+
+### Fix
+
+```python
+# AFTER (fixed)
+coordinator_slot_claimed = False   # set True only after on_job_start succeeds
+
+start_result = coordinator.on_job_start(job_id, "workflow", required_models)
+if not start_result['allowed']:
+    raise RuntimeError(f"Workflow queued: {start_result['reason']}")
+
+coordinator_slot_claimed = True    # slot is now held
+try:
+    ...
+finally:
+    if coordinator_slot_claimed:
+        coordinator.on_job_complete(job_id, "workflow")  # only fires if slot was claimed
+```
+
+The `coordinator_slot_claimed` flag ensures `on_job_complete` only fires when a slot was actually acquired.
+
+---
+
+## Issue #25 — HIGH: `blocked_by_job_id` not cleared in `already_active` / cache-hit paths — job keeps reappearing in coordinator queue
+
+**File**: `job_coordinator.py` → `on_job_start()`
+
+### Root Cause
+
+When `on_job_start()` is called for a job that is already pre-claimed (self-reservation), the code returns `allowed=True` without calling `clear_job_queue_info()`:
+
+```python
+# BEFORE (broken) — cache hit path
+if self._cache_contains(job_id):
+    logger.info(f"[COORDINATOR] Cache hit for {job_id} — slot already pre-claimed")
+    return {'allowed': True, 'reason': 'Pre-claimed (cache)'}
+    # clear_job_queue_info() NOT called
+```
+
+`clear_job_queue_info()` removes `blocked_by_job_id` and `queued_at` from the `jobs` row. If these are not cleared when the job is actually allowed to start, the job still appears as `blocked_by_job_id IS NOT NULL` in the DB. The next `process_next_queued_job()` sweep finds this job again — still in the list — and tries to trigger it a second time.
+
+The same issue existed in the `already_active` RPC result path (job_id found in DB's `active_jobs` array).
+
+### Impact
+
+- A pre-claimed job that gets the cache-hit or already_active path keeps `blocked_by_job_id` set
+- Next `process_next_queued_job()` call re-triggers the already-running job
+- Leads to a second `_trigger_job_processing()` call for an in-flight job → double execution
+
+### Fix
+
+```python
+# AFTER (fixed) — clear queue info in ALL allowed paths
+
+# Cache hit path
+if self._cache_contains(job_id):
+    self.clear_job_queue_info(job_id)   # ← added
+    return {'allowed': True, 'reason': 'Pre-claimed (cache)'}
+
+# already_active RPC result
+if rpc_result == 'already_active':
+    self.clear_job_queue_info(job_id)   # ← added
+    return {'allowed': True, 'reason': 'already_active'}
+
+# claimed RPC result (new claim)
+if rpc_result == 'claimed':
+    self.clear_job_queue_info(job_id)   # ← already here
+    return {'allowed': True, ...}
+```
+
+`clear_job_queue_info()` is called in every allowed-to-start path, ensuring `blocked_by_job_id` and `queued_at` are always cleared when the job actually starts.
+
+---
+
+## Issue #26 — HIGH: Workflow job stays `running` in DB when coordinator blocks it — `process_next_queued_job()` never finds it
+
+**File**: `job_coordinator.py` → `mark_job_queued()`
+
+### Root Cause
+
+When `on_job_start()` returns `allowed=False`, `mark_job_queued()` sets `blocked_by_job_id` and `queued_at`, but does not check or reset the job's `status`. If the job arrived via the realtime path, `handle_new_job()` had already set `status=running` in the DB (or it was set by a prior execution attempt). The job sits with `status=running` and `blocked_by_job_id IS NOT NULL`.
+
+`process_next_queued_job()` queried:
+```python
+.in_('status', ['pending', 'pending_retry'])
+.not_.is_('blocked_by_job_id', 'null')
+```
+
+`status=running` is not in `['pending', 'pending_retry']` → the job is never found → it waits forever.
+
+In practice this happened most visibly for workflow jobs: `handle_new_job()` sets `status=running` immediately when it spawns the workflow thread, before `coordinator.on_job_start()` is called. If the coordinator blocks the job, the DB shows `running` + `blocked_by_job_id IS NOT NULL` — an impossible state that the query filter never matches.
+
+### Impact
+
+- Any workflow job that is blocked by the coordinator while `status=running` never gets unblocked
+- Job appears to the user as perpetually "running" with no progress
+- No log evidence of the issue from the coordinator's perspective — `process_next_queued_job()` simply reports "No queued jobs found"
+
+### Fix
+
+```python
+# AFTER (fixed) — mark_job_queued() conditionally resets running → pending
+self.main_supabase.table('jobs').update({
+    'blocked_by_job_id': blocked_by,
+    'queued_at': datetime.utcnow().isoformat(),
+}).eq('job_id', job_id).execute()
+
+# Reset running → pending so process_next_queued_job() can find it
+self.main_supabase.table('jobs').update({
+    'status': 'pending'
+}).eq('job_id', job_id).eq('status', 'running').execute()
+#                         ^^^ guard: only reset if still 'running'
+```
+
+The `.eq('status', 'running')` guard prevents accidentally resetting a job that was already set to `pending_retry` or another status by a concurrent write.
+
+---
+
+## Issue #27 — HIGH: Retry sweep races with coordinator when promoting blocked workflow to `running`
+
+**File**: `job_coordinator.py` → `process_next_queued_job()`
+
+### Root Cause
+
+When unblocking a workflow job, the original code:
+1. Called `clear_job_queue_info()` (clears `blocked_by_job_id`, sets `queued_at=NULL`)
+2. Set `status=running`
+3. Spawned `_trigger_job_processing()`
+
+Step 1 happens before step 2. Between step 1 and step 2, `blocked_by_job_id` is `NULL` and `status` is still `pending`. The `workflow_retry_manager` periodic sweep queries:
+```python
+.eq('status', 'pending')
+.is_('blocked_by_job_id', 'null')
+```
+
+This window allows the retry manager to find the job and spawn a second thread — just as the coordinator is also about to spawn a thread. Both threads call `on_job_start()`. The self-reservation check allows both through. **Double execution**.
+
+### Impact
+
+- Every coordinator-triggered workflow resume has a brief race window where the retry sweep can also pick it up
+- Two simultaneous workflow executions for the same job
+- Steps run twice, checkpoints overwrite each other, duplicate AI API calls
+
+### Fix
+
+Reverse the order — set `status=running` **before** clearing `blocked_by_job_id`:
+
+```python
+# AFTER (fixed) — for workflow jobs in process_next_queued_job()
+# Step 1: promote status to 'running' first — closes the retry sweep's query window
+self.main_supabase.table('jobs').update({
+    'status': 'running'
+}).eq('job_id', job_id).execute()
+
+# Step 2: now safe to clear blocked_by_job_id
+self.clear_job_queue_info(job_id)
+
+# Step 3: spawn thread
+self._trigger_job_processing(job)
+```
+
+Once `status=running`, the retry sweep's `status=pending` filter excludes this job. The coordinator's thread is the sole executor.
+
+---
+
+## Issue #28 — HIGH: `workflows` with `required_models=[]` stored — `process_next_queued_job()` sees no conflict → two workflows claim slots simultaneously
+
+**File**: `job_coordinator.py` → `process_next_queued_job()`
+
+### Root Cause
+
+When a workflow job is blocked by the coordinator and written to the queue, `required_models` is stored in the `jobs` row. In some cases (race between `execute_workflow()` and the DB write), `required_models` is persisted as an empty list `[]`.
+
+When `process_next_queued_job()` reads two queued workflow jobs with `required_models=[]`:
+
+```python
+required_models_a = []   # workflow A
+required_models_b = []   # workflow B
+
+# Conflict check: set([]) & set([]) == set() — empty intersection → NO CONFLICT
+# Both are "claimed" — run in parallel
+```
+
+An empty model set has no intersection with anything. Two workflows that both require `vision-aicc` + `clipdrop` appear conflict-free and both claim slots. Both then attempt to call the same external APIs simultaneously.
+
+### Impact
+
+- Two concurrent workflows using the same AI providers → quota exhaustion, rate limits, or corrupted shared state
+- The second workflow's `on_job_start()` returns `claimed` (correctly) because `required_models=[]` has no conflict — but the intent was to block it
+- One workflow typically fails with a provider quota error → `pending_retry` → retry manager handles it, but the root cause remains
+
+### Fix
+
+```python
+# AFTER (fixed) — in process_next_queued_job(), re-extract models when stored list is empty
+required_models = job.get('required_models') or []
+
+if not required_models:
+    if job_type == 'workflow':
+        try:
+            from workflow_manager import get_workflow_manager
+            _wm = get_workflow_manager()
+            _cfg = _wm.get_workflow(job.get('model', ''))
+            if _cfg:
+                required_models = self.get_workflow_models(_cfg)
+                if required_models:
+                    # Persist so next call doesn't need to re-extract
+                    self.main_supabase.table('jobs').update(
+                        {'required_models': required_models}
+                    ).eq('job_id', job_id).execute()
+        except Exception as _e:
+            logger.warning(f"Could not re-extract models for workflow {job_id}: {_e}")
+    else:
+        required_models = [self.get_job_model(job)]
+```
+
+If `required_models` is empty for a workflow, the config is re-read to get the correct model list. The repopulated value is written back to the DB so future calls don't repeat the work.
+
+---
+
+## Issue #29 — MEDIUM: `try_claim_coordinator_slot` RPC received a JSON string instead of JSONB — PostgreSQL error 22023
+
+**File**: `job_coordinator.py` → `try_claim_slot()`
+
+### Root Cause
+
+```python
+# BEFORE (broken)
+import json
+
+def try_claim_slot(self, job_id, job_type, models):
+    result = self.supabase.rpc('try_claim_coordinator_slot', {
+        'p_job_id':   job_id,
+        'p_job_type': job_type,
+        'p_models':   json.dumps(models),   # ← produces a JSON string: '["model-a", "model-b"]'
+    }).execute()
+```
+
+`json.dumps(models)` produces a Python `str`. The Supabase Python client serializes this as a JSON string in the RPC payload. PostgreSQL receives `p_models` as a `text` scalar — not a `jsonb` array. When the stored procedure calls `jsonb_array_elements(p_models)`, PostgreSQL raises:
+
+```
+ERROR: cannot extract elements from a scalar
+DETAIL: ERROR: 22023
+```
+
+### Impact
+
+- Every `on_job_start()` call throws a `PostgrestAPIError` with code `22023`
+- Coordinator never claims any slot — all jobs are effectively "allowed" through without coordination
+- No model-conflict checking — parallel execution without guard rails
+
+### Fix
+
+```python
+# AFTER (fixed)
+def try_claim_slot(self, job_id, job_type, models):
+    result = self.supabase.rpc('try_claim_coordinator_slot', {
+        'p_job_id':   job_id,
+        'p_job_type': job_type,
+        'p_models':   models,   # ← pass Python list directly; Supabase client serialises to JSONB
+    }).execute()
+```
+
+Passing the Python `list` directly lets the Supabase client serialize it as a JSON array, which PostgreSQL correctly receives as `jsonb`. The `import json` statement was also removed (no longer needed in this module).
+
+---
+
+## Updated Fix Summary Table
+
+| # | Severity | File(s) | Description |
+|---|---|---|---|
+| 22 | 🔴 Critical | `job_coordinator.py` | Use `main_supabase` (main DB) for all `jobs` table ops; use `self.supabase` (Worker1) only for `job_queue_state` / `job_queue_log` |
+| 23 | 🔴 Critical | `job_coordinator.py` + Worker1 DB | Replace `threading.RLock` with PostgreSQL `SELECT FOR UPDATE` stored procs (`try_claim_coordinator_slot`, `release_coordinator_slot`) for true cross-process atomicity |
+| 24 | 🟠 High | `workflow_manager.py` | `coordinator_slot_claimed` flag — only call `on_job_complete()` in `finally` when slot was actually acquired |
+| 25 | 🟠 High | `job_coordinator.py` | Call `clear_job_queue_info()` in ALL allowed paths (`claimed`, `already_active`, cache hit) — prevents `blocked_by_job_id` staying set after job starts |
+| 26 | 🟠 High | `job_coordinator.py` | `mark_job_queued()` conditionally resets `status: running → pending` (guarded by `.eq('status', 'running')`) — workflows blocked while `running` now visible to `process_next_queued_job()` |
+| 27 | 🟠 High | `job_coordinator.py` | Set `status=running` BEFORE clearing `blocked_by_job_id` in `process_next_queued_job()` — closes retry-sweep race window |
+| 28 | 🟠 High | `job_coordinator.py` | Re-extract `required_models` from workflow config when stored value is `[]` — prevents empty-set false "no conflict" between two workflows |
+| 29 | 🟡 Medium | `job_coordinator.py` | Pass `models` as Python `list` to `try_claim_coordinator_slot` RPC (not `json.dumps`) — fixes PostgreSQL `22023: cannot extract elements from a scalar` error |

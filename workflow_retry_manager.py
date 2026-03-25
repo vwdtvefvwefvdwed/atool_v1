@@ -11,11 +11,11 @@ from typing import Optional
 _workflow_thread_semaphore = threading.BoundedSemaphore(10)
 
 
-def _spawn_workflow_thread(target_fn, name: str = "WorkflowThread"):
+def _spawn_workflow_thread(target_fn, name: str = "WorkflowThread", job_id: str = None):
     """
     Throttled wrapper for spawning a workflow execution thread.
-    Silently drops the spawn attempt if the semaphore is full (the job
-    will be retried in the next periodic cycle).
+    If the semaphore is full the spawn is dropped and the job status is reset
+    from 'running' back to 'pending_retry' so the next periodic cycle picks it up.
     """
     def _guarded():
         if not _workflow_thread_semaphore.acquire(timeout=5):
@@ -23,6 +23,18 @@ def _spawn_workflow_thread(target_fn, name: str = "WorkflowThread"):
                 f"[SEMAPHORE] Workflow thread limit reached — skipping spawn for {name}. "
                 f"Job will be retried in the next cycle."
             )
+            if job_id:
+                try:
+                    from supabase_client import supabase as _sb
+                    _sb.table('jobs').update({'status': 'pending_retry'}) \
+                        .eq('job_id', job_id).eq('status', 'running').execute()
+                    logging.getLogger(__name__).info(
+                        f"[SEMAPHORE] Reset job {job_id} from running -> pending_retry"
+                    )
+                except Exception as _e:
+                    logging.getLogger(__name__).error(
+                        f"[SEMAPHORE] Failed to reset job {job_id} after semaphore skip: {_e}"
+                    )
             return
         try:
             target_fn()
@@ -123,6 +135,13 @@ class WorkflowRetryManager:
                         logger.debug(f"Stale pending workflow {job_id} has key error — skipping, waiting for key insertion")
                         continue
 
+                    # Atomic claim — prevents duplicate execution across processes.
+                    claim = supabase.table('jobs').update({'status': 'running'}) \
+                        .eq('job_id', job_id).eq('status', 'pending').execute()
+                    if not claim.data:
+                        logger.debug(f"Stale job {job_id} already claimed by another process — skipping")
+                        continue
+
                     logger.info(f"Re-triggering stale pending workflow {workflow_id} for job {job_id}")
 
                     def _run(wf_id=workflow_id, img=image_url, uid=user_id, jid=job_id):
@@ -140,10 +159,16 @@ class WorkflowRetryManager:
                             ))
                         except Exception as _e:
                             logger.error(f"Stale workflow re-trigger failed for {jid}: {_e}")
+                            # Reset if still 'running' — coordinator blocked or pre-execution failure
+                            try:
+                                supabase.table('jobs').update({'status': 'pending_retry'}) \
+                                    .eq('job_id', jid).eq('status', 'running').execute()
+                            except Exception as _re:
+                                logger.error(f"Failed to reset job {jid} status: {_re}")
                         finally:
                             loop.close()
 
-                    _spawn_workflow_thread(_run, name=f"StaleWF-{job_id}")
+                    _spawn_workflow_thread(_run, name=f"StaleWF-{job_id}", job_id=job_id)
 
                 except Exception as e:
                     logger.error(f"Error re-triggering stale workflow job {job.get('job_id')}: {e}")
@@ -213,8 +238,16 @@ class WorkflowRetryManager:
                         continue
                     
                     can_retry = await self._can_retry(execution)
-                    
+
                     if can_retry:
+                        # Atomic claim — only one process proceeds if both app.py and
+                        # job_worker query the same pending_retry job simultaneously.
+                        claim = supabase.table('jobs').update({'status': 'running'}) \
+                            .eq('job_id', job_id).eq('status', 'pending_retry').execute()
+                        if not claim.data:
+                            logger.debug(f"Job {job_id} already claimed by another process — skipping")
+                            continue
+
                         logger.info(f"Retrying workflow for job {job_id}")
                         # Spawn a thread rather than awaiting directly.
                         # Awaiting _resume_workflow() blocks the retry loop's event
@@ -230,7 +263,7 @@ class WorkflowRetryManager:
                                 loop.run_until_complete(self._resume_workflow(eid, jid))
                             finally:
                                 loop.close()
-                        _spawn_workflow_thread(_do_resume, name=f"RetryWF-{job_id}")
+                        _spawn_workflow_thread(_do_resume, name=f"RetryWF-{job_id}", job_id=job_id)
                     else:
                         logger.debug(f"Conditions not met for retry: {job_id}")
                 
@@ -337,9 +370,9 @@ class WorkflowRetryManager:
     
     async def _resume_workflow(self, execution_id: str, job_id: str):
         from workflow_manager import get_workflow_manager
-        
+
         workflow_manager = get_workflow_manager()
-        
+
         try:
             await workflow_manager.resume_workflow(
                 execution_id=execution_id,
@@ -347,7 +380,18 @@ class WorkflowRetryManager:
             )
         except Exception as e:
             logger.error(f"Failed to resume workflow {execution_id}: {e}", exc_info=True)
-    
+            # Reset status back to pending_retry only if still 'running' (i.e. the job
+            # was not already marked failed/completed by base_workflow before the raise).
+            # This covers: coordinator blocking after atomic claim, semaphore-skip that
+            # somehow still reaches here, and any pre-execution exception.
+            try:
+                reset = supabase.table('jobs').update({'status': 'pending_retry'}) \
+                    .eq('job_id', job_id).eq('status', 'running').execute()
+                if reset.data:
+                    logger.info(f"[RESUME] Reset job {job_id} from running -> pending_retry after failure")
+            except Exception as reset_err:
+                logger.error(f"[RESUME] Failed to reset job {job_id} status: {reset_err}")
+
     async def _mark_failed(self, job_id: str, reason: str):
         try:
             supabase.table('jobs').update({
@@ -418,9 +462,17 @@ class WorkflowRetryManager:
                     except Exception as _val_err:
                         print(f"   ⚠️  validate_job_inputs error for {job_id}: {_val_err} — proceeding anyway")
                     
+                    # Atomic claim — prevents duplicate execution if app.py periodic
+                    # retry loop and worker startup both pick up the same pending job.
+                    claim = supabase.table('jobs').update({'status': 'running'}) \
+                        .eq('job_id', job_id).eq('status', 'pending').execute()
+                    if not claim.data:
+                        logger.debug(f"Job {job_id} already claimed by another process — skipping")
+                        continue
+
                     img_preview = image_url[:50] if image_url else "(no image)"
                     print(f"   Starting workflow {workflow_id} for job {job_id} with image: {img_preview}...")
-                    
+
                     def run_workflow(wf_id=workflow_id, img=image_url, uid=user_id, jid=job_id):
                         loop = asyncio.new_event_loop()
                         asyncio.set_event_loop(loop)
@@ -435,10 +487,16 @@ class WorkflowRetryManager:
                             )
                         except Exception as e:
                             logger.error(f"Workflow execution error for job {jid}: {e}")
+                            # Reset if still 'running' — coordinator blocked or pre-execution failure
+                            try:
+                                supabase.table('jobs').update({'status': 'pending_retry'}) \
+                                    .eq('job_id', jid).eq('status', 'running').execute()
+                            except Exception as _re:
+                                logger.error(f"Failed to reset job {jid} status: {_re}")
                         finally:
                             loop.close()
-                    
-                    _spawn_workflow_thread(run_workflow, name=f"PendingWF-{job_id}")
+
+                    _spawn_workflow_thread(run_workflow, name=f"PendingWF-{job_id}", job_id=job_id)
                     count += 1
                     
                 except Exception as e:
@@ -520,8 +578,16 @@ class WorkflowRetryManager:
                         print(f"   ⏳ Skipping {job_id} — backoff not elapsed yet (will retry in periodic loop)")
                         continue
 
+                    # Atomic claim — prevents duplicate execution if app.py periodic
+                    # retry loop and worker startup both pick up the same pending_retry job.
+                    claim = supabase.table('jobs').update({'status': 'running'}) \
+                        .eq('job_id', job_id).eq('status', 'pending_retry').execute()
+                    if not claim.data:
+                        logger.debug(f"Job {job_id} already claimed by another process — skipping")
+                        continue
+
                     print(f"   Retrying workflow for job {job_id}")
-                    
+
                     # Run async resume in thread
                     def resume(exec_id=execution_id, jid=job_id):
                         loop = asyncio.new_event_loop()
@@ -532,8 +598,8 @@ class WorkflowRetryManager:
                             )
                         finally:
                             loop.close()
-                    
-                    _spawn_workflow_thread(resume, name=f"RetryWF-{job_id}")
+
+                    _spawn_workflow_thread(resume, name=f"RetryWF-{job_id}", job_id=job_id)
                     count += 1
                     
                 except Exception as e:
