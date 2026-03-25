@@ -1764,7 +1764,7 @@ def generate_with_deapi(prompt, model, aspect_ratio, api_key, input_image_url=No
         steps = 20
     elif deapi_model == "Flux1schnell":
         guidance = 7.5
-        steps = 20
+        steps = 9
     else:
         guidance = 7.5
         steps = 20
