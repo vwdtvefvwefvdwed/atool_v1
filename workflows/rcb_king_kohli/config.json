@@ -1,0 +1,53 @@
+{
+  "id": "rcb-king-kohli",
+  "name": "RCB King Kohli",
+  "description": "Put your face into the iconic RCB celebrating squad photo — AI face swap with seamless identity preservation + fast 4x upscale (2 credits)",
+  "icon": "🏏",
+  "category": "sports",
+  "preview_video": null,
+  "preview_thumbnail": null,
+  "enabled": true,
+  "default_prompts": {
+    "image_edit_male": "Use Image B as the base image and Image A as the identity reference.\n\nEdit ONLY the foreground player on the right (open mouth, raised arm). Do not modify any other part of the image.\n\nMale Identity Transfer:\nReplace the face with the male identity from Image A.\n\n* The final subject MUST remain male\n* Preserve masculine facial structure (jawline, brow, facial proportions)\n\nFace Requirements:\n\n* Keep exact head position, angle, and perspective from Image B\n* Preserve original facial expression (wide-open mouth, excitement)\n* Preserve gaze direction\n* Transfer ONLY identity (facial features and structure), not expression\n\nSkin Tone Adaptation:\n\n* Match the face skin tone to the body from Image B\n* Do NOT keep mismatched tone from Image A\n* Ensure uniform skin tone across face, neck, and arms\n\nBlending & Realism:\n\n* Seamless blending at hairline, jawline, and neck\n* Maintain natural skin texture (pores, slight imperfections)\n* Avoid over-smoothing or artificial look\n* Maintain correct facial muscle tension\n\nLighting & Color:\n\n* Match stadium lighting exactly (direction, shadows, highlights)\n* Ensure face lighting matches body lighting perfectly\n\nBody Consistency:\n\n* Keep original male body, pose, jersey, and proportions unchanged\n* Preserve natural muscle structure and masculine build\n\nHard Constraints:\n\n* Do NOT modify background, other people, or composition\n* Do NOT generate a new image\n* Do NOT alter hands, jersey, or objects\n* Keep everything except the face identical\n\nFinal Output:\nA fully realistic male subject with correct skin tone, lighting, and seamless integration, indistinguishable from the original photograph.",
+    "image_edit_female": "Use Image B as the base image and Image A as the identity reference. Perform a complete full-body identity replacement on the foreground player on the right (open mouth, raised arm). This is NOT a simple face swap — replace the entire visible person including face, head, skin tone, and body structure while preserving the exact pose, expression, and camera perspective from Image B. Do not modify any other person, background element, or composition. Only the selected subject should be transformed.\n\nTransfer the full facial structure, features, and identity from Image A onto the subject. Preserve the head position, tilt, and perspective from Image B. Keep the wide-open mouth expression exactly as it appears. Preserve gaze direction and eye position. Maintain correct head scale relative to the body. Adapt the identity to match the stadium lighting and skin tone conditions of Image B. Ensure seamless skin tone continuity across face, neck, chest, and arms with no patching, mismatch, or pasted appearance anywhere.\n\nConvert the subject's body to a realistic athletic female physique while maintaining the original pose. Replace the flat male chest with a clearly defined, natural female bust that is prominently and realistically visible under the jersey fabric. The bust must be full and natural in proportion, with the jersey fabric showing realistic stretch, tension, and drape over the chest contours. The female chest form must be unmistakable and the cleavage line or chest silhouette should be visible through the fabric where natural. Remove all male torso flatness and define a feminine torso silhouette with a narrower waist, slightly wider hips, and natural female body curvature. Maintain athletic muscle tone appropriate for a professional female athlete. Define a natural collarbone and décolletage area where visible. Reduce shoulder width moderately to female athletic proportions and soften the neck-to-shoulder transition. Slim and taper the arms while keeping athletic muscle definition. Slim the hands and fingers, reduce knuckle prominence, and maintain natural female arm proportions in the raised position. The overall physique must read as a trained, strong, and athletic female — think professional female soccer, basketball, or volleyball player body type with realistic curves, tone, and proportions.\n\nKeep all jersey details completely identical including number, logos, colors, folds, and wrinkles. Allow the fabric to naturally conform to the new female body shape and show realistic stretch and pull across the chest area. Do not alter any other clothing elements. Match the stadium lighting exactly including direction, shadows, and highlights across the entire body. The face and body must share identical lighting conditions with no inconsistency.\n\nDo NOT modify the background, other people, composition, framing, pose, body position, camera angle, perspective, objects, or environment. Only the selected subject is to be transformed. The final result must look like a real photograph taken at the same stadium moment but with the selected subject now appearing as a real female athlete with correct female anatomy, a clearly visible and realistic female bust under the jersey, full identity integration from Image A, perfect lighting and shadow matching, natural fabric behavior over the female body shape, and zero visible editing artifacts. The transformation must be photorealistic, anatomically convincing, and completely indistinguishable from an original photograph.",
+    "upscale": "Ultra high-resolution photorealistic cricket fan face swap, sharp focus, intricate details, cinematic quality, 8K, HDR"
+  },
+  "reference_image_b": "https://res.cloudinary.com/dnagl4r2t/image/upload/v1775980698/gemini-3.1-flash-image-preview_nano-banana-2__a_A_realistic__high-qu_wlmswh.png",
+  "supported_models": {
+    "image_edit": [
+      "nano-banana-ondemand"
+    ],
+    "upscale": [
+      "clipdrop-upscale"
+    ]
+  },
+  "steps": [
+    {
+      "id": 0,
+      "name": "upload",
+      "type": "input",
+      "description": "Upload your face image",
+      "required_input": "image"
+    },
+    {
+      "id": 1,
+      "name": "image_edit",
+      "type": "generation",
+      "description": "AI-powered RCB face swap with identity preservation",
+      "model_type": "image",
+      "default_model": "nano-banana-ondemand",
+      "provider": "vision-ondemand"
+    },
+    {
+      "id": 2,
+      "name": "upscale",
+      "type": "generation",
+      "description": "Fast upscale with Clipdrop (2 credits)",
+      "model_type": "image",
+      "default_model": "clipdrop-upscale",
+      "provider": "vision-clipdrop"
+    }
+  ],
+  "estimated_duration_seconds": 60,
+  "credits_cost": 27
+}

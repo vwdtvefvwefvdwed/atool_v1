@@ -18,7 +18,8 @@ from dotenv_vault import load_dotenv
 from postgrest.exceptions import APIError
 from multi_endpoint_manager import generate, get_endpoint_type
 from provider_api_keys import get_api_key_for_job, increment_usage_count, get_worker1_client, map_model_to_provider, get_all_api_keys_for_provider
-from api_key_rotation import handle_api_key_rotation, handle_roundrobin_rotation, log_rotation_attempt, NO_DELETE_ROTATE_PROVIDERS
+from api_key_rotation import handle_api_key_rotation, handle_roundrobin_rotation, log_rotation_attempt
+from provider_constants import NO_DELETE_ROTATE_PROVIDERS
 from error_notifier import notify_error, ErrorType
 from model_quota_manager import ensure_quota_manager_started, get_quota_manager
 from cloudinary_manager import get_cloudinary_manager
@@ -683,51 +684,87 @@ def validate_job_inputs(job) -> bool:
 
 def retry_transient_errors():
     """
-    Retry pending jobs that failed with transient errors (Cloudinary, network, timeout).
-    Called periodically by the worker main loop.
+    Retry pending AND pending_retry jobs that failed with transient errors (Cloudinary, network, timeout).
+    Called periodically by the worker main loop every 10 minutes.
 
     NOTE: API-key errors (no key, invalid key, rotation failed) are intentionally excluded.
     Those jobs must only be re-triggered when a matching key is inserted via
     api_key_realtime_listener → handle_api_key_insertion().
     """
     try:
-        print("[RETRY] Checking for pending jobs with transient errors...")
+        print("[RETRY] Checking for pending/pending_retry jobs with transient errors...")
 
-        # Use the main Supabase client (jobs table lives in the main DB).
-        # get_worker1_client() returns the Worker1 DB client which may not have
-        # the jobs table — or may return None if Worker1 credentials are absent,
-        # causing the entire periodic sweep to silently stop working.
         from supabase_client import supabase as _retry_sb
 
-        # Query pending, UNBLOCKED jobs with error messages.
-        # Coordinator-blocked jobs (blocked_by_job_id IS NOT NULL) must only be
-        # re-triggered by coordinator.process_next_queued_job() when their blocker
-        # finishes — not by the timer sweep.
-        result = _retry_sb.table("jobs") \
-            .select("job_id, model, error_message, created_at, updated_at") \
+        # Query PENDING jobs (non-workflow) with error messages
+        pending_result = _retry_sb.table("jobs") \
+            .select("job_id, model, error_message, created_at, updated_at, job_type") \
             .eq("status", "pending") \
+            .neq("job_type", "workflow") \
             .is_("blocked_by_job_id", "null") \
             .not_.is_("error_message", "null") \
             .order("created_at", desc=False) \
             .limit(50) \
             .execute()
         
-        jobs = result.data if result and hasattr(result, 'data') else []
+        pending_jobs = pending_result.data if pending_result and hasattr(pending_result, 'data') else []
+
+        # Query PENDING_RETRY jobs (non-workflow) with error messages
+        pending_retry_result = _retry_sb.table("jobs") \
+            .select("job_id, model, error_message, created_at, updated_at, job_type, metadata") \
+            .eq("status", "pending_retry") \
+            .neq("job_type", "workflow") \
+            .is_("blocked_by_job_id", "null") \
+            .order("created_at", desc=False) \
+            .limit(50) \
+            .execute()
+        
+        pending_retry_jobs = pending_retry_result.data if pending_retry_result and hasattr(pending_retry_result, 'data') else []
+
+        jobs = pending_jobs + pending_retry_jobs
         
         if not jobs:
-            print("[RETRY] No pending jobs with errors found")
+            print("[RETRY] No pending/pending_retry jobs with errors found")
             return
         
-        print(f"[RETRY] Found {len(jobs)} pending jobs with errors")
+        print(f"[RETRY] Found {len(pending_jobs)} pending + {len(pending_retry_jobs)} pending_retry jobs with errors")
         
         retryable_count = 0
         for job in jobs:
             error_msg = (job.get("error_message") or "").lower()
+            job_status = job.get("status", "pending")
+            job_id = job.get("job_id")
 
             # Skip API-key errors — these MUST only retry on key insertion, not on timer
             if _is_key_error(error_msg):
-                print(f"[RETRY] Skipping job {job['job_id']} — key-related error, waiting for API key insertion")
+                print(f"[RETRY] Skipping job {job_id} — key-related error, waiting for API key insertion")
                 continue
+            
+            # For pending_retry jobs: check retry_after timestamp and max retries
+            if job_status == "pending_retry":
+                metadata = job.get("metadata", {}) or {}
+                retry_count = metadata.get("pending_retry_count", 0)
+                
+                # Determine max retries based on provider
+                _job_provider = metadata.get("provider_key") or job.get("provider_key")
+                _max_retries = MAX_PENDING_RETRIES_AICC if _job_provider in _AICC_PROVIDERS else MAX_PENDING_RETRIES
+                
+                if retry_count >= _max_retries:
+                    print(f"[RETRY] Skipping pending_retry job {job_id} — max retries ({_max_retries}) reached")
+                    continue
+                
+                # Check retry_after timestamp - wait before retrying
+                retry_after_str = metadata.get("retry_after")
+                if retry_after_str:
+                    try:
+                        import datetime as _dt
+                        retry_after = _dt.datetime.fromisoformat(retry_after_str)
+                        if _dt.datetime.utcnow() < retry_after:
+                            _wait = (retry_after - _dt.datetime.utcnow()).total_seconds()
+                            print(f"[RETRY] Skipping pending_retry job {job_id} — retry_after not reached ({_wait:.0f}s remaining)")
+                            continue
+                    except Exception:
+                        pass
             
             # Only retry genuinely transient infrastructure errors.
             # quota_exceeded is included so that quota-reset jobs are picked up here
@@ -755,7 +792,7 @@ def retry_transient_errors():
                         _last_dt = datetime.fromisoformat(_last_ts.replace("Z", "+00:00"))
                         _elapsed = (datetime.utcnow() - _last_dt.replace(tzinfo=None)).total_seconds()
                         if _elapsed < 86400:  # 24 hours
-                            print(f"[RETRY] Skipping quota-exceeded job {job['job_id']} — "
+                            print(f"[RETRY] Skipping quota-exceeded job {job_id} — "
                                   f"last attempt {_elapsed/3600:.1f}h ago, waiting for 24h quota reset")
                             continue
                     except Exception:
@@ -763,13 +800,13 @@ def retry_transient_errors():
 
             if is_transient:
                 retryable_count += 1
-                print(f"[RETRY] Retrying job {job['job_id']} ({job.get('model')}) - Error: {job.get('error_message', 'Unknown')[:80]}")
+                print(f"[RETRY] Retrying job {job_id} ({job.get('model')}) - Error: {job.get('error_message', 'Unknown')[:80]}")
                 
                 # Fetch full job data and trigger processing
                 try:
                     full_job_result = _retry_sb.table("jobs") \
                         .select("*") \
-                        .eq("job_id", job["job_id"]) \
+                        .eq("job_id", job_id) \
                         .single() \
                         .execute()
                     
@@ -781,9 +818,9 @@ def retry_transient_errors():
                         )
                         retry_thread.start()
                     else:
-                        print(f"[RETRY] Could not fetch full job data for {job['job_id']}")
+                        print(f"[RETRY] Could not fetch full job data for {job_id}")
                 except Exception as api_err:
-                    print(f"[RETRY] API error fetching job {job['job_id']}: {api_err}")
+                    print(f"[RETRY] API error fetching job {job_id}: {api_err}")
         
         if retryable_count > 0:
             print(f"[RETRY] Triggered retry for {retryable_count} jobs with transient errors")
@@ -1069,16 +1106,16 @@ def process_video_job(job):
             provider_key = _meta_provider_v or _model_provider_v
         print(f"Determined provider from model: {provider_key}")
         
-        # vision-xeven is a FREE API that doesn't require an API key (image only)
-        if provider_key == "vision-xeven":
-            print(f"Using FREE Xeven API - no API key required")
-            provider_api_key = None
-            api_key_id = None
+        # If rotation already selected the next key, use it directly (skip re-fetch)
+        if job.get("_rotated_api_key"):
+            provider_api_key = job.pop("_rotated_api_key")
+            api_key_id = job.pop("_rotated_api_key_id", None)
+            print(f"[ROTATION] Using pre-rotated API key (id={api_key_id}) for provider: {provider_key}")
         else:
             api_key_data = get_api_key_for_job(job_model, provider_key, job_type="video")
-            
+
             provider_api_key = None
-            
+
             if api_key_data:
                 api_key_id = api_key_data.get("id")
                 provider_api_key = api_key_data.get("api_key")
@@ -1361,7 +1398,9 @@ def process_video_job(job):
                                    error_message, rotation_success)
                 if rotation_success and next_key:
                     job["_rr_rotation_count"] = rr_count + 1
-                    print(f"[RR-ROTATION] Retrying video job (attempt {rr_count + 1}/{max_attempts})...")
+                    job["_rotated_api_key"] = next_key.get("api_key")
+                    job["_rotated_api_key_id"] = next_key.get("id")
+                    print(f"[RR-ROTATION] Retrying video job with key #{next_key.get('key_number')} (attempt {rr_count + 1}/{max_attempts})...")
                     return process_video_job(job)
                 else:
                     print(f"[RR-ROTATION] No keys available for '{provider_key}' - failing job")
@@ -1444,16 +1483,16 @@ def process_image_job(job):
             mark_job_failed(job_id, "⚠️ This tool requires an input image. Please upload a reference image and try again.")
             return
         
-        # vision-xeven is a FREE API that doesn't require an API key
-        if provider_key == "vision-xeven":
-            print(f"Using FREE Xeven API - no API key required")
-            provider_api_key = None
-            api_key_id = None
+        # If rotation already selected the next key, use it directly (skip re-fetch)
+        if job.get("_rotated_api_key"):
+            provider_api_key = job.pop("_rotated_api_key")
+            api_key_id = job.pop("_rotated_api_key_id", None)
+            print(f"[ROTATION] Using pre-rotated API key (id={api_key_id}) for provider: {provider_key}")
         else:
             api_key_data = get_api_key_for_job(model_name, provider_key, job_type="image")
-            
+
             provider_api_key = None
-            
+
             if api_key_data:
                 api_key_id = api_key_data.get("id")
                 provider_api_key = api_key_data.get("api_key")
@@ -1485,12 +1524,28 @@ def process_image_job(job):
             provider_key=provider_key,
             input_image_url=input_image_url,
             job_type="image",
-            mask_url=mask_url
+            mask_url=mask_url,
+            job_id=job_id
         )
         
         if not result.get("success"):
             error_msg = result.get("error", "Generation failed")
             raise Exception(error_msg)
+        
+        # Handle webhook mode - job will be completed via webhook callback
+        if result.get("status") == "queued":
+            print(f"[WEBHOOK] Job {job_id} queued, waiting for webhook delivery...")
+            print(f"[WEBHOOK] Execution ID: {result.get('execution_id')}")
+            from supabase_client import supabase
+            existing_meta = job.get("metadata") or {}
+            existing_meta["execution_id"] = result.get("execution_id")
+            existing_meta["webhook_pending"] = True
+            supabase.table("jobs").update({
+                "status": "running",
+                "metadata": existing_meta
+            }).eq("job_id", job_id).execute()
+            print(f"[WEBHOOK] Job {job_id} marked as running, exiting worker...")
+            return
         
         if result.get("is_raw_bytes"):
             print(f"Generation returned raw bytes, using directly...")
@@ -1780,7 +1835,9 @@ def process_image_job(job):
 
                 if rotation_success and next_key:
                     job["_rr_rotation_count"] = rr_count + 1
-                    print(f"[RR-ROTATION] Retrying image job (attempt {rr_count + 1}/{max_attempts})...")
+                    job["_rotated_api_key"] = next_key.get("api_key")
+                    job["_rotated_api_key_id"] = next_key.get("id")
+                    print(f"[RR-ROTATION] Retrying image job with key #{next_key.get('key_number')} (attempt {rr_count + 1}/{max_attempts})...")
                     return process_image_job(job)
                 else:
                     print(f"[RR-ROTATION] No keys available for '{provider_key}' - failing job")
@@ -2851,6 +2908,12 @@ def worker_startup_tasks():
         process_all_pending_workflow_jobs()
         print("Initial backlog processed!\n")
         
+        # Start workflow retry manager for periodic retry of pending_retry workflows
+        # This runs every 5 minutes and handles workflow jobs with pending_retry status
+        from workflow_retry_manager import start_retry_manager
+        start_retry_manager()
+        print("[STARTUP] Workflow retry manager started (5-min periodic loop)\n")
+        
         worker_status["backlog_processed"] = True
         worker_status["startup_complete"] = True
         worker_status["ready"] = True
@@ -2860,6 +2923,7 @@ def worker_startup_tasks():
         print("=" * 60)
         print("Switching to REALTIME mode (no more polling)")
         print("Will receive instant notifications for new jobs")
+        print("Periodic retry: every 10 min for normal jobs, 5 min for workflows")
         print("=" * 60)
         print()
         sys.stdout.flush()

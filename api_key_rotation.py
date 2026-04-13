@@ -7,68 +7,86 @@ the current API key is deleted and the next available key is fetched.
 
 import re
 from typing import Optional, Dict, Any, Tuple
-from provider_api_keys import delete_api_key, get_next_api_key_for_provider, get_all_api_keys_for_provider
+from provider_api_keys import delete_api_key, get_next_api_key_for_provider, get_all_api_keys_for_provider, get_worker1_client
+import api_key_status_manager
+from provider_constants import NO_DELETE_ROTATE_PROVIDERS, CREDIT_EXCEEDED_DELETE_PROVIDERS, NO_API_KEY_PROVIDERS, NO_DELETE_COOLDOWN_SECONDS
+
+
+def get_key_number_from_id(api_key_id: int) -> Optional[int]:
+    """Fetch key_number from provider_api_keys table by id."""
+    client = get_worker1_client()
+    if not client:
+        return None
+    result = client.table("provider_api_keys").select("key_number").eq("id", api_key_id).limit(1).execute()
+    if result.data:
+        return int(result.data[0]["key_number"])
+    return None
 
 
 PROVIDER_KEY_MAPPING = {
-    # vision-* image providers (from multi_endpoint_manager.py)
-    "vision-nova": "replicate",
-    "vision-pixazo": "pixazo",
-    "vision-huggingface": "huggingface",
-    "vision-ultrafast": "rapidapi",
-    "vision-atlas": "a4f",
-    "vision-flux": "kie",
-    "vision-removebg": "removebg",
-    "vision-bria": "bria_vision",
-    "vision-xeven": "xeven",
-    "vision-infip": "infip",
-    "vision-deapi": "deapi",
-    "cinematic-deapi": "deapi",
-    "vision-leonardo": "leonardo",
-    "vision-stabilityai": "stabilityai",
-    "vision-picsart": "picsart",
-    "vision-clipdrop": "clipdrop",
-    "vision-frenix": "frenix",
-    "vision-aicc":    "aicc",
-    "cinematic-aicc": "aicc",
-    "vision-felo":    "felo",
-    "felo":           "felo",
-    # cinematic-* video providers (from multi_endpoint_manager.py)
-    "cinematic-nova": "replicate",
-    "cinematic-pro": "kie",
-    "cinematic-bria": "bria_cinematic",
-    "cinematic-leonardo": "leonardo",
-    "cinematic-vercel": "vercel_ai_gateway",
-    "vision-vercel": "vercel_ai_gateway",
-    # bare provider names (used by image/video job worker directly)
-    "replicate": "replicate",
-    "pixazo": "pixazo",
-    "huggingface": "huggingface",
-    "leonardo": "leonardo",
-    "stabilityai": "stabilityai",
-    "stability": "stabilityai",
-    "rapidapi": "rapidapi",
-    "a4f": "a4f",
-    "kie": "kie",
-    "removebg": "removebg",
-    "bria": "bria_vision",
-    "bria_vision": "bria_vision",
-    "bria_cinematic": "bria_cinematic",
-    "xeven": "xeven",
-    "infip": "infip",
-    "deapi": "deapi",
-    "openai": "openai",
-    "fal": "fal",
-    "runway": "runway",
-    "kling": "kling",
-    "luma": "luma",
-    "pika": "pika",
-    "vercel_ai_gateway": "vercel_ai_gateway",
-    "vercel": "vercel_ai_gateway",
-    "picsart": "picsart",
-    "clipdrop": "clipdrop",
-    "frenix": "frenix",
-    "aicc":   "aicc",
+# vision-* image providers (from multi_endpoint_manager.py)
+"vision-nova": "replicate",
+"vision-pixazo": "pixazo",
+"vision-huggingface": "huggingface",
+"vision-ultrafast": "rapidapi",
+"vision-atlas": "a4f",
+"vision-flux": "kie",
+"vision-removebg": "removebg",
+"vision-bria": "bria_vision",
+"vision-custom": "custom",
+"vision-infip": "infip",
+"vision-deapi": "deapi",
+"cinematic-deapi": "deapi",
+"vision-leonardo": "leonardo",
+"vision-stabilityai": "stabilityai",
+"vision-picsart": "picsart",
+"vision-clipdrop": "clipdrop",
+"vision-frenix": "frenix",
+"vision-aicc": "aicc",
+"cinematic-aicc": "aicc",
+"vision-felo": "felo",
+"felo": "felo",
+"vision-gemini": "gemini",
+"vision-geminiwebapi": "geminiwebapi",
+"vision-ondemand": "ondemand",
+# cinematic-* video providers (from multi_endpoint_manager.py)
+"cinematic-nova": "replicate",
+"cinematic-pro": "kie",
+"cinematic-bria": "bria_cinematic",
+"cinematic-leonardo": "leonardo",
+"cinematic-vercel": "vercel_ai_gateway",
+"vision-vercel": "vercel_ai_gateway",
+# bare provider names (used by image/video job worker directly)
+"replicate": "replicate",
+"pixazo": "pixazo",
+"huggingface": "huggingface",
+"leonardo": "leonardo",
+"stabilityai": "stabilityai",
+"stability": "stabilityai",
+"rapidapi": "rapidapi",
+"a4f": "a4f",
+"kie": "kie",
+"removebg": "removebg",
+"bria": "bria_vision",
+"bria_vision": "bria_vision",
+"bria_cinematic": "bria_cinematic",
+"custom": "custom",
+"infip": "infip",
+"deapi": "deapi",
+"openai": "openai",
+"fal": "fal",
+"runway": "runway",
+"kling": "kling",
+"luma": "luma",
+"pika": "pika",
+"vercel_ai_gateway": "vercel_ai_gateway",
+"vercel": "vercel_ai_gateway",
+"picsart": "picsart",
+"clipdrop": "clipdrop",
+"frenix": "frenix",
+"aicc": "aicc",
+"geminiwebapi": "geminiwebapi",
+"ondemand": "ondemand",
 }
 
 _COMMON_LIMIT_PATTERNS = [
@@ -121,14 +139,6 @@ _COMMON_ENTRY = {
     "limit_reached": _COMMON_LIMIT_PATTERNS,
     "credit_exceeded": _COMMON_CREDIT_PATTERNS,
 }
-
-NO_API_KEY_PROVIDERS = {"xeven"}
-
-NO_DELETE_ROTATE_PROVIDERS = {"vision-infip", "vision-a4f", "vision-frenix", "vision-aicc", "cinematic-aicc", "aicc", "vision-clipdrop", "vision-felo", "felo"}
-
-# Providers in NO_DELETE_ROTATE_PROVIDERS that SHOULD delete the key on credit_exceeded
-# (rate limit → rotate only; credit exhausted → delete + rotate)
-CREDIT_EXCEEDED_DELETE_PROVIDERS = {"vision-aicc", "cinematic-aicc", "aicc"}
 
 ERROR_PATTERNS = {
     "replicate": {
@@ -401,7 +411,59 @@ ERROR_PATTERNS = {
     "kling":          _COMMON_ENTRY,
     "luma":           _COMMON_ENTRY,
     "pika":           _COMMON_ENTRY,
-    "xeven":          _COMMON_ENTRY,
+    "custom":         _COMMON_ENTRY,
+    "gemini": {
+        "limit_reached": _COMMON_LIMIT_PATTERNS + [
+            r"quota exceeded",
+            r"rate limit",
+            r"too many requests",
+        ],
+        "credit_exceeded": _COMMON_CREDIT_PATTERNS + [
+            r"insufficient credit",
+            r"payment required",
+            r"billing",
+            r" quota ",
+        ],
+    },
+    "geminiwebapi": {
+        "limit_reached": _COMMON_LIMIT_PATTERNS + [
+            r"rate limit",
+            r"too many requests",
+            r"temporarily blocked",
+            r"quota exceeded",
+            r"429",
+        ],
+        "credit_exceeded": _COMMON_CREDIT_PATTERNS + [
+            r"login required",
+            r"session expired",
+            r"cookie invalid",
+            r"authentication failed",
+            r"unauthorized",
+            r"401",
+            r"403",
+        ],
+    },
+    "ondemand": {
+        "limit_reached": _COMMON_LIMIT_PATTERNS + [
+            r"429",
+            r"rate limit",
+            r"too many requests",
+        ],
+        "credit_exceeded": _COMMON_CREDIT_PATTERNS + [
+            r"402",
+            r"payment required",
+            r"credit exhausted",
+            r"insufficient credit",
+            r"401",
+            r"unauthorized",
+            r"invalid api key",
+            r"api key not found",
+            r"authentication failed",
+            r"errors\.no\.executable\.plugin\.found",
+            r"invalid_request",
+            r"invalid agent",
+        ],
+    },
 }
 
 
@@ -457,7 +519,7 @@ def should_rotate_key(error_message: str, provider: str) -> bool:
     Returns False for:
     - Network/timeout errors (not a key problem)
     - Unknown providers with no patterns registered
-    - Providers that don't use API keys (e.g., xeven free API)
+    - Providers that don't use API keys
     """
     actual_provider = PROVIDER_KEY_MAPPING.get(provider.lower(), provider.lower())
 
@@ -519,6 +581,9 @@ def handle_api_key_rotation(
     print(f"Current API Key ID: {current_api_key_id}")
     print(f"{'='*70}\n")
     
+    # Note: For delete-on-error providers, we don't use cooldown tracking - keys are deleted.
+    # Error recording is only done in handle_roundrobin_rotation for NO_DELETE_ROTATE_PROVIDERS.
+    
     if should_rotate_key(error_message, provider_key):
         print(f"[ROTATION] Deleting failed API key {current_api_key_id}...")
         
@@ -575,6 +640,19 @@ def handle_roundrobin_rotation(
     print(f"Error Type: {error_type}")
     print(f"Error Message: {error_message}")
     print(f"{'='*70}\n")
+
+    # Record error in status table for cooldown tracking ONLY for NO_DELETE providers
+    # All errors for these providers get 25 hour cooldown (no deletion)
+    # CREDIT_EXCEEDED_DELETE_PROVIDERS still delete on credit_exceeded, so don't record for that case
+    should_record_error = provider_key in NO_DELETE_ROTATE_PROVIDERS
+    is_credit_delete_case = error_type == "credit_exceeded" and provider_key in CREDIT_EXCEEDED_DELETE_PROVIDERS
+    
+    if should_record_error and not is_credit_delete_case and current_api_key_id is not None:
+        key_number = get_key_number_from_id(current_api_key_id)
+        if key_number and error_type:
+            # All errors for NO_DELETE providers get 25 hour cooldown
+            api_key_status_manager.record_key_error(provider_key, key_number, error_type, error_message, NO_DELETE_COOLDOWN_SECONDS)
+            print(f"[RR-ROTATION] Recorded error for key #{key_number}, cooldown for 25 hours")
 
     if not should_rotate_key(error_message, provider_key):
         print(f"[RR-ROTATION] Error type '{error_type}' does not require rotation")

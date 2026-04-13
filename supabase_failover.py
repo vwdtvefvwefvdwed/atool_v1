@@ -83,9 +83,9 @@ class SupabaseFailoverManager:
         # Initialize clients
         if not MAIN_SUPABASE_URL or not MAIN_SUPABASE_KEY:
             raise ValueError("Main Supabase credentials not found in environment variables")
-        
+
         self._main_client: Client = create_client(MAIN_SUPABASE_URL, MAIN_SUPABASE_KEY)
-        
+
         if BACKUP_SUPABASE_URL and BACKUP_SUPABASE_KEY:
             self._backup_client: Client = create_client(BACKUP_SUPABASE_URL, BACKUP_SUPABASE_KEY)
             print(f"[OK] Supabase failover initialized: Main + Backup ready")

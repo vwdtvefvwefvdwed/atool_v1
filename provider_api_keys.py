@@ -11,6 +11,8 @@ from typing import Optional, Dict, Any
 from supabase import create_client, Client
 from dotenv_vault import load_dotenv
 import api_key_round_robin
+import api_key_status_manager
+from provider_constants import NO_DELETE_ROTATE_PROVIDERS
 
 load_dotenv()
 
@@ -79,22 +81,32 @@ def get_provider_api_key(provider_key: str) -> Optional[Dict[str, Any]]:
             .execute()
         
         if keys_result.data and len(keys_result.data) > 0:
-            if next_row < len(keys_result.data):
-                key_data = keys_result.data[next_row]
-                print(f"[OK] Found API key for provider '{provider_key}' (key #{key_data.get('key_number', '?')})")
+            total_keys = len(keys_result.data)
+            # For NO_DELETE providers, check cooldown status
+            # For delete-on-error providers, skip cooldown check (keys are deleted on error)
+            use_cooldown_check = provider_key in NO_DELETE_ROTATE_PROVIDERS
+            
+            attempts = 0
+            while attempts < total_keys:
+                row = (next_row + attempts) % total_keys
+                key_candidate = keys_result.data[row]
+                key_num = int(key_candidate['key_number'])
                 
-                api_key_round_robin.mark_row_used(provider_key, next_row)
+                if use_cooldown_check:
+                    # Skip keys in cooldown for NO_DELETE providers
+                    if api_key_status_manager.is_key_in_cooldown(provider_key, key_num):
+                        attempts += 1
+                        continue
                 
-                return key_data
+                print(f"[OK] Found API key for provider '{provider_key}' (key #{key_num})")
+                api_key_round_robin.mark_row_used(provider_key, row)
+                return key_candidate
+            
+            if use_cooldown_check:
+                print(f"[WARN] All API keys for provider '{provider_key}' are in cooldown")
             else:
-                print(f"[WARN] Row {next_row} out of range for provider '{provider_key}' ({len(keys_result.data)} keys)")
-                api_key_round_robin.reset_provider(provider_key)
-                if len(keys_result.data) > 0:
-                    key_data = keys_result.data[0]
-                    print(f"[OK] Fallback to key #0 for provider '{provider_key}'")
-                    api_key_round_robin.mark_row_used(provider_key, 0)
-                    return key_data
-                return None
+                print(f"[WARN] No API keys available for provider '{provider_key}'")
+            return None
         else:
             print(f"[WARN] No API keys found for provider '{provider_key}'")
             return None
@@ -189,12 +201,16 @@ def map_model_to_provider(model_name: str, job_type: str = "image") -> Optional[
     """
     # Image providers
     image_providers = {
-        "vision-xeven": [
-            "sdxl-lightning-xeven",
-            "sdxl-xeven",
-            "flux-schnell-2",
-            "lucid-origin",
-            "phoenix-2",
+        "vision-custom": [
+            "flux-fast-custom",
+            "sdxl-fast-custom",
+            "flux2-klein-custom",
+            "flux2-klein-9b-custom",
+            "flux-dev-custom",
+            "flux-pro-custom",
+            "sdxl-custom",
+            "leonardo-custom",
+            "phoenix-custom",
         ],
         "vision-nova": [
             "google/imagen-4",
@@ -253,6 +269,13 @@ def map_model_to_provider(model_name: str, job_type: str = "image") -> Optional[
             "qwen",
             "flux2-klein-9b",
             "flux2-dev",
+            "phoenix-infip",
+            "lucid-origin",
+            "sdxl-infip",
+            "sdxl-lite-infip",
+            "img3",
+            "img4",
+            "flux-schnell-infip",
         ],
         "vision-deapi": [
             "z-image-turbo-deapi",
@@ -276,6 +299,13 @@ def map_model_to_provider(model_name: str, job_type: str = "image") -> Optional[
         "vision-frenix": [
             "frenix-dirtberry",
             "frenix-flux-2-pro",
+            "frenix-z-image",
+            "frenix-imagen-2",
+            "frenix-imagen-4",
+            "frenix-flux-2-flex",
+            "frenix-flux-2-dev",
+            "frenix-flux-klein-4b",
+            "frenix-flux-klein-9b",
         ],
         "vision-aicc": [
             "gemini-25-flash-aicc",
@@ -283,7 +313,22 @@ def map_model_to_provider(model_name: str, job_type: str = "image") -> Optional[
         "vision-felo": [
             "nano-banana-2",
         ],
-    }
+        "vision-gemini": [
+            "gemini-2.5-flash-image",
+        ],
+        "vision-geminiwebapi": [
+            "gemini-2.5-flash-image-web",
+            "gemini-3.1-flash-image-web",
+            "gemini-1.5-flash-web",
+            "gemini-2.0-flash-web",
+        "gemini-2.5-pro-web",
+        "gemini-3-pro-web",
+    ],
+    "vision-ondemand": [
+        "nano-banana-ondemand",
+        "nano-banana-2-ondemand",
+    ],
+}
     
     # Video providers
     video_providers = {
@@ -367,7 +412,7 @@ def get_api_key_for_job(model_name: str, provider_key: Optional[str] = None, job
     return api_key_data
 
 
-def delete_api_key(api_key_id: int, error_message: str = None) -> bool:
+def delete_api_key(api_key_id: int, error_message: str | None = None) -> bool:
     """
     Delete/disable an API key when it returns an error.
     Archives the key in deleted_api_keys table before deletion.
@@ -466,19 +511,29 @@ def get_next_api_key_for_provider(provider_key: str) -> Optional[Dict[str, Any]]
             .execute()
         
         if keys_result.data and len(keys_result.data) > 0:
-            if next_row < len(keys_result.data):
-                key_data = keys_result.data[next_row]
-                print(f"[OK] Got next API key for provider '{provider_key}' (key #{key_data.get('key_number', '?')})")
-                api_key_round_robin.mark_row_used(provider_key, next_row)
-                return key_data
+            total_keys = len(keys_result.data)
+            use_cooldown_check = provider_key in NO_DELETE_ROTATE_PROVIDERS
+            
+            attempts = 0
+            while attempts < total_keys:
+                row = (next_row + attempts) % total_keys
+                key_candidate = keys_result.data[row]
+                key_num = int(key_candidate['key_number'])
+                
+                if use_cooldown_check:
+                    if api_key_status_manager.is_key_in_cooldown(provider_key, key_num):
+                        attempts += 1
+                        continue
+                
+                print(f"[OK] Got next API key for provider '{provider_key}' (key #{key_num})")
+                api_key_round_robin.mark_row_used(provider_key, row)
+                return key_candidate
+            
+            if use_cooldown_check:
+                print(f"[WARN] All API keys for provider '{provider_key}' are in cooldown")
             else:
-                api_key_round_robin.reset_provider(provider_key)
-                if len(keys_result.data) > 0:
-                    key_data = keys_result.data[0]
-                    print(f"[OK] Fallback to key #0 for provider '{provider_key}'")
-                    api_key_round_robin.mark_row_used(provider_key, 0)
-                    return key_data
-                return None
+                print(f"[WARN] No API keys available for provider '{provider_key}'")
+            return None
         else:
             print(f"[WARN] No API keys found for provider '{provider_key}'")
             return None
@@ -526,3 +581,22 @@ def get_all_api_keys_for_provider(provider_key: str) -> list:
     except Exception as e:
         print(f"[ERROR] Failed to get all API keys for '{provider_key}': {e}")
         return []
+
+
+def clear_api_key_status(provider_key: str, key_number: int) -> bool:
+    """
+    Clear cooldown and reset error counters for a key after successful use.
+    
+    Note: Only call this for providers in NO_DELETE_ROTATE_PROVIDERS.
+    Delete-on-error providers don't use cooldown tracking.
+    
+    Args:
+        provider_key: Provider identifier
+        key_number: Key number within the provider
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    if provider_key not in NO_DELETE_ROTATE_PROVIDERS:
+        return True
+    return api_key_status_manager.clear_key_success(provider_key, key_number)

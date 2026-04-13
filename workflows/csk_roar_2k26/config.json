@@ -1,0 +1,53 @@
+{
+  "id": "csk-roar-2k26",
+  "name": "CSK Roar 2K26",
+  "description": "Put your face into the iconic CSK squad photo — AI face swap with seamless identity preservation + fast 4x upscale (2 credits)",
+  "icon": "🏏",
+  "category": "sports",
+  "preview_video": null,
+  "preview_thumbnail": null,
+  "enabled": true,
+  "default_prompts": {
+    "image_edit_male": "DO NOT generate a new image. DO NOT recreate or reimagine anything. Use the exact provided reference image as the base and perform a minimal localized edit only.\n\nSTRICT PIXEL LOCK — Every single pixel outside the front selfie person is completely frozen and must not change by even 1 pixel. Every background person, face, body, object, trophy, logo, stadium, crowd, lights, and surrounding element must remain 100% identical to the reference image. Do not touch anything behind the front selfie person under any circumstance.\n\nPerform a complete full body swap — not just face — of the front selfie person (closest to camera, left side, arms stretched out). Replace the entire person including face, head, neck, body, arms, and hands with the identity and physique from Image A. This is a full person replacement, not a face paste.\n\nHead and Face: The head must be naturally positioned to match the exact selfie camera angle of the reference image — slight upward tilt, close to camera, wide angle perspective distortion on the nose and chin. The face must NOT appear flat, straight-on, or incorrectly angled. Force the face from Image A to conform to the exact selfie perspective — chin slightly forward, face slightly angled toward the camera from below. The identity from Image A must be fully and clearly recognizable — exact eye color, nose, lips, jawline, beard style, skin tone, and hair.\n\nExpression — Critical: The fan must look genuinely excited and emotionally expressive — like a real fan standing next to their favorite player and feeling thrilled and starstruck. Show a big natural excited smile with teeth visible, cheeks raised, eyes wide and lit up with joy and excitement. The expression must feel real and emotional — not neutral, not posed, not flat. This is a fan living their dream moment and their face must show that pure excitement and happiness naturally.\n\nHead to Body Connection: The neck must grow naturally from the face into the shoulders with zero seam, zero color jump, and zero disconnection. The head size must be correctly proportioned to the body — not too large, not too small. The neck width must match the face jawline naturally. No floating head, no pasted face, no visible join line anywhere between head and body.\n\nBody: Replace the entire visible body with the physique and proportions of the male subject from Image A. Match body width, shoulder width, arm thickness, and overall build. Keep the exact same selfie pose — one arm stretched toward camera, body facing slightly forward. All jersey details must remain completely identical — same CSK yellow jersey, Gulf badge, ETIHAD Airways text, CSK dragon logo, four stars, fabric folds, and colors. Allow jersey to naturally conform to the new body shape.\n\nSkin and Lighting: Match skin tone consistently across face, neck, arms, and hands. Match the stadium lighting direction, shadows, and highlights across the entire replaced person. No mismatch between face and body skin tone. Consistent texture and sharpness throughout.\n\nArms and Hands: Replace arms and hands to match the build of Image A. Keep the exact same arm position and selfie gesture. Blend naturally into the jersey sleeves.\n\nTouch absolutely nothing outside the front selfie person. Not even 1 pixel of the background, Dhoni, trophies, stadium, crowd, logos, or any surrounding element should change. Final output must look like a real original photograph.",
+    "image_edit_female": "DO NOT generate a new image. DO NOT recreate or reimagine anything. Use the exact provided reference image as the base and perform a minimal localized edit only.\n\nSTRICT PIXEL LOCK — Every single pixel outside the front selfie person is completely frozen and must not change by even 1 pixel. Every background person, face, body, object, trophy, logo, stadium, crowd, lights, and surrounding element must remain 100% identical to the reference image. Do not touch anything behind the front selfie person under any circumstance.\n\nPerform a complete full body swap — not just face — of the front selfie person (closest to camera, left side, arms stretched out). Replace the entire person including face, head, neck, body, arms, and hands with the female identity and physique from Image A. This is a full person replacement, not a face paste.\n\nHead and Face: The head must be naturally positioned to match the exact selfie camera angle of the reference image — slight upward tilt, close to camera, wide angle perspective distortion. The face must NOT appear flat, straight-on, or incorrectly angled. Force the female face from Image A to conform to the exact selfie perspective — chin slightly forward, face slightly angled toward camera from below. The female identity from Image A must be fully and clearly recognizable — exact eye color, nose, lips, jawline, skin tone, and hair. Remove all beard and stubble completely — smooth clean female skin with zero shadow or residue. Soften jawline to natural female proportions.\n\nExpression — Critical: The fan must look genuinely excited and emotionally expressive — like a real fan standing next to their favorite player and feeling thrilled and starstruck. Show a big natural excited smile with teeth visible, cheeks raised, eyes wide and sparkling with joy and excitement. The expression must feel real and emotional — not neutral, not posed, not flat. This is a fan living their dream moment and their face must show that pure excitement and happiness naturally.\n\nHead to Body Connection: The neck must grow naturally from the female face into the shoulders with zero seam, zero color jump, and zero disconnection. Head size must be correctly proportioned to the body. Neck width must match the female jawline naturally. No floating head, no pasted face, no visible join line anywhere.\n\nBody: Replace the entire visible body with a natural female physique matching Image A. Slim shoulders to female proportions. Define a natural female torso with narrower waist and feminine curves. Replace the flat male chest with a clearly visible natural female chest shape under the jersey — jersey fabric must naturally conform and stretch over the female chest form. Female chest must be clearly visible and naturally shaped under the fabric.\n\nArms and Hands: Replace with slim natural female arms and hands. Slim fingers, reduce knuckle prominence, taper wrists. Keep the exact same selfie pose and arm gesture. Blend naturally into jersey sleeves.\n\nJersey and Clothing: All jersey details must remain completely identical — same CSK yellow jersey, Gulf badge, ETIHAD Airways text, CSK dragon logo, four stars, fabric folds, and colors. Allow jersey to naturally conform to the female body shape.\n\nSkin and Lighting: Match skin tone consistently across face, neck, arms, and hands. Match stadium lighting direction, shadows, and highlights across the entire replaced person. Consistent texture and sharpness throughout.\n\nTouch absolutely nothing outside the front selfie person. Not even 1 pixel of the background, Dhoni, trophies, stadium, crowd, logos, or any surrounding element should change. Final output must look like a real original photograph.",
+    "upscale": "Ultra high-resolution photorealistic cricket fan face swap, sharp focus, intricate details, cinematic quality, 8K, HDR"
+  },
+  "reference_image_b": "https://res.cloudinary.com/dnagl4r2t/image/upload/v1776050394/csk_final1__1_cx0px8.png",
+  "supported_models": {
+    "image_edit": [
+      "nano-banana-ondemand"
+    ],
+    "upscale": [
+      "clipdrop-upscale"
+    ]
+  },
+  "steps": [
+    {
+      "id": 0,
+      "name": "upload",
+      "type": "input",
+      "description": "Upload your face image",
+      "required_input": "image"
+    },
+    {
+      "id": 1,
+      "name": "image_edit",
+      "type": "generation",
+      "description": "AI-powered CSK face swap with identity preservation",
+      "model_type": "image",
+      "default_model": "nano-banana-ondemand",
+      "provider": "vision-ondemand"
+    },
+    {
+      "id": 2,
+      "name": "upscale",
+      "type": "generation",
+      "description": "Fast upscale with Clipdrop (2 credits)",
+      "model_type": "image",
+      "default_model": "clipdrop-upscale",
+      "provider": "vision-clipdrop"
+    }
+  ],
+  "estimated_duration_seconds": 60,
+  "credits_cost": 27
+}

@@ -90,6 +90,19 @@ class WorkflowManager:
             return result
         except Exception as e:
             logger.error(f"Workflow {job_id} failed: {e}")
+            # Infrastructure failure (e.g. socket error, DNS failure) happened
+            # before the workflow instance could even start executing.
+            # Reset the job to pending_retry so the periodic retry sweep picks it up.
+            try:
+                from jobs import update_job_status
+                update_job_status(job_id, 'pending_retry', {
+                    'error': f"Infrastructure error before execution: {str(e)[:200]}",
+                    'can_resume': True,
+                    'retryable': True
+                })
+                logger.warning(f"[WORKFLOW_MANAGER] Job {job_id} reset to pending_retry after pre-execution error: {e}")
+            except Exception as _status_err:
+                logger.error(f"[WORKFLOW_MANAGER] Could not reset job {job_id} to pending_retry: {_status_err}")
             raise
         finally:
             if coordinator_slot_claimed:
@@ -189,6 +202,17 @@ class WorkflowManager:
             )
         except Exception as e:
             logger.error(f"Workflow {job_id} resume failed: {e}")
+            # Same infrastructure failure guard — reset to pending_retry
+            try:
+                from jobs import update_job_status
+                update_job_status(job_id, 'pending_retry', {
+                    'error': f"Infrastructure error during resume: {str(e)[:200]}",
+                    'can_resume': True,
+                    'retryable': True
+                })
+                logger.warning(f"[WORKFLOW_MANAGER] Job {job_id} reset to pending_retry after resume error: {e}")
+            except Exception as _status_err:
+                logger.error(f"[WORKFLOW_MANAGER] Could not reset job {job_id} to pending_retry: {_status_err}")
             raise
         finally:
             if coordinator_slot_claimed:

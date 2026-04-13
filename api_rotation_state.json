@@ -27,7 +27,7 @@
     "current_row": 1
   },
   "vision-clipdrop": {
-    "current_row": 1
+    "current_row": 3
   },
   "vision-frenix": {
     "current_row": 1
@@ -42,12 +42,24 @@
     "current_row": 2
   },
   "vision-aicc": {
-    "current_row": 1
+    "current_row": 4
   },
   "vision-felo": {
     "current_row": 1
   },
   "cinematic-aicc": {
+    "current_row": 1
+  },
+  "vision-custom": {
+    "current_row": 1
+  },
+  "vision-gemini": {
+    "current_row": 1
+  },
+  "vision-geminiwebapi": {
+    "current_row": 1
+  },
+  "vision-ondemand": {
     "current_row": 1
   }
 }

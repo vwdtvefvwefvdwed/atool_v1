@@ -60,8 +60,8 @@ class GotStyleImgToImgWorkflow(BaseWorkflow):
         logger.info("Starting GOT style image edit step")
         endpoint_manager = get_endpoint_manager()
         
-        model = step_config.get('model', step_config.get('default_model', 'gemini-25-flash-aicc'))
-        provider = step_config.get('provider', 'vision-aicc')
+        model = step_config.get('model', step_config.get('default_model', 'nano-banana-ondemand'))
+        provider = step_config.get('provider', 'vision-ondemand')
         prompt = self.config['default_prompts']['image_edit']
         
         logger.info(f"Using model: {model}, provider: {provider}")

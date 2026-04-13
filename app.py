@@ -79,9 +79,9 @@ ensure_quota_manager_started()
 from worker_health import ping_all_workers_async
 ping_all_workers_async()
 
-# Start workflow retry manager for auto-retry of failed workflows
-from workflow_retry_manager import start_retry_manager
-start_retry_manager()
+# Workflow retry manager moved to job_worker_realtime.py (runs in only one place)
+# from workflow_retry_manager import start_retry_manager
+# start_retry_manager()
 
 # Configure CORS to allow requests from frontend
 # This fixes the "No 'Access-Control-Allow-Origin' header" error
@@ -345,14 +345,18 @@ def generate():
 
 @app.route("/list-models", methods=["GET"])
 def list_models():
-    """Return available models for each provider. Vision-xeven (FREE) shown first, then vision-atlas, vision-nova (Replicate), and other providers."""
+    """Return available models for each provider. Vision-custom shown first, then vision-atlas, vision-nova (Replicate), and other providers."""
     models = {
-        "vision-xeven": [
-            {"name": "sdxl-lightning-xeven", "displayName": "SDXL Lightning", "type": "image"},
-            {"name": "flux-schnell-2", "displayName": "Flux Schnell (2)", "type": "image"},
-            {"name": "sdxl-xeven", "displayName": "SDXL Base", "type": "image"},
-            {"name": "phoenix-2", "displayName": "Phoenix (2)", "type": "image"},
-            {"name": "lucid-origin", "displayName": "Lucid Origin", "type": "image"},
+        "vision-custom": [
+            {"name": "flux-fast-custom", "displayName": "FLUX Fast", "type": "image"},
+            {"name": "sdxl-fast-custom", "displayName": "SDXL Fast", "type": "image"},
+            {"name": "flux2-klein-custom", "displayName": "FLUX 2 Klein 4B", "type": "image"},
+            {"name": "flux2-klein-9b-custom", "displayName": "FLUX 2 Klein 9B", "type": "image"},
+            {"name": "flux-dev-custom", "displayName": "FLUX Dev", "type": "image"},
+            {"name": "flux-pro-custom", "displayName": "FLUX Pro", "type": "image"},
+            {"name": "sdxl-custom", "displayName": "SDXL Base", "type": "image"},
+            {"name": "leonardo-custom", "displayName": "Leonardo", "type": "image"},
+            {"name": "phoenix-custom", "displayName": "Phoenix", "type": "image"},
         ],
         "vision-atlas": [
             {"name": "fal-ai/flux-2-pro", "displayName": "FLUX 2 Pro", "type": "image"},
@@ -396,6 +400,13 @@ def list_models():
             {"name": "qwen", "displayName": "Qwen", "type": "image"},
             {"name": "flux2-klein-9b", "displayName": "FLUX 2 Klein", "type": "image"},
             {"name": "flux2-dev", "displayName": "FLUX 2 Dev", "type": "image"},
+            {"name": "phoenix", "displayName": "Phoenix", "type": "image"},
+            {"name": "lucid-origin", "displayName": "Lucid Origin", "type": "image"},
+            {"name": "sdxl", "displayName": "SDXL", "type": "image"},
+            {"name": "sdxl-lite", "displayName": "SDXL Lite", "type": "image"},
+            {"name": "img3", "displayName": "Imagen 3", "type": "image"},
+            {"name": "img4", "displayName": "Imagen 4", "type": "image"},
+            {"name": "flux-schnell", "displayName": "FLUX Schnell", "type": "image"},
         ],
         "vision-deapi": [
             {"name": "z-image-turbo-deapi", "displayName": "Z-Image Turbo (2)", "type": "image"},
@@ -1873,14 +1884,107 @@ def health():
     }), 200
 
 
+@app.route("/ondemand/webhook", methods=["POST"])
+def ondemand_webhook():
+    """Webhook endpoint for On-Demand API result delivery.
+    
+    Expected payload from On-Demand:
+    {
+        "executionID": "...",
+        "status": "success" | "failed",
+        "data": {
+            "image_url": "...",
+            "output": "..."
+        },
+        "job_id": "..."  // passed through from initial execute request
+    }
+    """
+    try:
+        payload = request.json
+        print(f"[OnDemand Webhook] RAW payload: {json.dumps(payload, indent=2)}")
+        
+        execution_id = payload.get("executionID") or payload.get("id") or payload.get("data", {}).get("id")
+        status = payload.get("status") or payload.get("state") or payload.get("data", {}).get("status")
+        data = payload.get("data", {})
+        job_id = payload.get("job_id")
+        
+        print(f"[OnDemand Webhook] execution_id={execution_id}, status={status}, job_id={job_id}")
+        
+        # Try to get job_id from execution mapping if not in payload
+        if not job_id:
+            from ondemand_provider import get_execution_id
+            job_id = get_execution_id(execution_id)
+        
+        if not job_id:
+            print(f"[OnDemand Webhook] No job_id found for execution {execution_id}")
+            return jsonify({"status": "error", "error": "No job_id mapping"}), 400
+        
+        if status in ["success", "completed"]:
+            image_url = data.get("image_url") or data.get("output") or data.get("result") or data.get("url")
+            text_output = data.get("text") or data.get("message")
+            
+            # Handle nested output
+            if not image_url and isinstance(data, dict):
+                output_nested = data.get("output", {})
+                if isinstance(output_nested, dict):
+                    image_url = output_nested.get("image_url") or output_nested.get("url")
+                elif isinstance(output_nested, str):
+                    image_url = output_nested
+            
+            print(f"[OnDemand Webhook] Extracted image_url: {image_url}")
+            
+            # Update job with result
+            update_data = {
+                "status": "completed",
+                "image_url": image_url
+            }
+            
+            if text_output:
+                from supabase_client import supabase
+                # Fetch existing metadata and merge
+                meta_resp = supabase.table("jobs").select("metadata").eq("job_id", job_id).execute()
+                existing_meta = meta_resp.data[0]["metadata"] if meta_resp.data and meta_resp.data[0] else {}
+                existing_meta = existing_meta or {}
+                existing_meta["output"] = text_output
+                update_data["metadata"] = existing_meta
+            
+            from supabase_client import supabase
+            supabase.table("jobs").update(update_data).eq("job_id", job_id).execute()
+            
+            print(f"[OnDemand Webhook] Job {job_id} updated with image: {image_url}")
+            return jsonify({"status": "ok", "job_id": job_id}), 200
+            
+        elif status in ["failed", "error"]:
+            error_msg = data.get("error", "Unknown error")
+            
+            from supabase_client import supabase
+            supabase.table("jobs").update({
+                "status": "failed",
+                "error": error_msg
+            }).eq("job_id", job_id).execute()
+            
+            print(f"[OnDemand Webhook] Job {job_id} marked as failed: {error_msg}")
+            return jsonify({"status": "error_logged", "job_id": job_id}), 200
+        
+        else:
+            print(f"[OnDemand Webhook] Unknown status: {status}")
+            return jsonify({"status": "ignored", "reason": "unknown_status"}), 200
+            
+    except Exception as e:
+        print(f"[OnDemand Webhook] Error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/maintenance-status", methods=["GET"])
 def maintenance_status():
     """Check if system is in maintenance mode"""
     from supabase_failover import get_failover_manager
-    
+
     failover_manager = get_failover_manager()
     status = failover_manager.get_status()
-    
+
     return jsonify({
         "maintenance_mode": status["maintenance_mode"],
         "using_backup": status["using_backup"],
@@ -2555,12 +2659,17 @@ def execute_workflow():
         print(f"📋 Files: {list(request.files.keys())}")
         
         workflow_id = request.form.get('workflow_id') or request.json.get('workflow_id')
-        
+
         if not workflow_id:
             return jsonify({
                 "success": False,
                 "error": "workflow_id is required"
             }), 400
+
+        # Extract optional gender_version for workflows that support male/female prompt selection
+        gender_version = request.form.get('gender_version')
+        if gender_version and gender_version not in ('male', 'female'):
+            gender_version = None
         
         workflow_manager = get_workflow_manager()
         workflow = workflow_manager.get_workflow(workflow_id)
@@ -2643,10 +2752,17 @@ def execute_workflow():
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
+                # Build input_data: dict when gender_version present, else raw URL for backward compat
+                wf_input = input_image_url or input_file
+                if gender_version and isinstance(wf_input, str):
+                    wf_input = {
+                        'image_url': input_image_url,
+                        'gender_version': gender_version,
+                    }
                 loop.run_until_complete(
                     workflow_manager.execute_workflow(
                         workflow_id=workflow_id,
-                        input_data=input_image_url or input_file,
+                        input_data=wf_input,
                         user_id=user_id,
                         job_id=job_id
                     )

@@ -21,6 +21,8 @@ Routes generation requests to different API providers based on provider key:
 - vision-aicc → AICC API (Image generation / img2img via Gemini 2.5 Flash)
 - cinematic-aicc → AICC API (Video generation via Wan 2.2 i2v-plus)
 - vision-felo → Felo AI API (Text-to-image + image editing via nano-banana-2)
+- vision-gemini → Gemini API (Image generation & editing via Gemini 2.0 Flash)
+- vision-ondemand → On-Demand API (Webhook-based image generation via workflow execution)
 """
 
 import os
@@ -213,24 +215,58 @@ BRIA_CINEMATIC_MODELS = {
     'bria_video_foreground_mask': '/video/generate/foreground_mask',
 }
 
-# Xeven Free API Models - https://ai-image-api.xeven.workers.dev/img
-# Note: This is a FREE API that doesn't require an API key
-XEVEN_MODELS = {
-    # Fast and high-quality models
-    'sdxl-lightning-xeven': 'sdxl-lightning',  # Fast, high-quality < 5 secs
-    'sdxl-xeven': 'sdxl',  # Balanced, professional < 12 secs
-    'flux-schnell-2': 'flux-schnell',  # Best realistic model < 6 secs (numbered to avoid conflict with A4F)
-    'lucid-origin': 'lucid-origin',  # High-quality artistic images
-    'phoenix-2': 'phoenix',  # Professional-grade (numbered to avoid conflict with A4F)
+# Custom Cloudflare Workers AI Models
+# Endpoint URL is stored in Supabase (api_key field) and rotated on limit
+CUSTOM_MODELS = {
+    'flux-fast-custom':       'flux_fast',        # FLUX 1 Schnell, bulk generation
+    'sdxl-fast-custom':       'sdxl_fast',        # SDXL Lightning, preview engine
+    'flux2-klein-custom':     'flux_2_klein',     # FLUX 2 Klein 4B, balanced quality
+    'flux2-klein-9b-custom':  'flux_2_klein_9b',  # FLUX 2 Klein 9B, high quality
+    'flux-dev-custom':        'flux_dev',         # FLUX Dev, high quality
+    'flux-pro-custom':        'flux_pro',         # FLUX Pro, ultra quality (limited use)
+    'sdxl-custom':            'sdxl',             # SDXL Base, balanced, supports img2img
+    'leonardo-custom':        'leonardo',         # Lucid Origin, artistic quality
+    'phoenix-custom':         'phoenix',          # Phoenix 1.0, professional quality
 }
+
+# Steps configuration per model and aspect ratio for vision-custom provider
+# Based on MASTER MODEL PLAN - optimized steps for quality/speed balance
+CUSTOM_MODEL_STEPS = {
+    'flux_fast':        {'1:1': 8,  '16:9': 10, '9:16': 10},  # Bulk generator
+    'sdxl_fast':        {'1:1': 6,  '16:9': 6,  '9:16': 6},   # Preview engine
+    'flux_2_klein':     {'1:1': 22, '16:9': 24, '9:16': 24},  # Balanced quality (4B)
+    'flux_2_klein_9b':  {'1:1': 24, '16:9': 26, '9:16': 26},  # High quality (9B)
+    'flux_dev':         {'1:1': 28, '16:9': 30, '9:16': 30},  # High quality
+    'flux_pro':         {'1:1': 30, '16:9': 32, '9:16': 32},  # Ultra quality (premium)
+    'sdxl':             {'1:1': 35, '16:9': 38, '9:16': 38},  # Classic quality
+    'leonardo':         {'1:1': 25, '16:9': 28, '9:16': 28},  # Artistic
+    'phoenix':          {'1:1': 25, '16:9': 28, '9:16': 28},  # Cinematic
+}
+
+# Only these 3 aspect ratios supported for vision-custom models
+CUSTOM_MODEL_RATIOS = ['1:1', '16:9', '9:16']
 
 # Infip.pro API Models - https://api.infip.pro/v1
 # Note: Async models (z-image-turbo, qwen) require polling
 INFIP_MODELS = {
+    # New naming convention with -infip suffix (used by frontend)
     'z-image-turbo': 'z-image-turbo',  # Fast async model
     'qwen': 'qwen',  # Qwen async model
     'flux2-klein-9b': 'flux2-klein-9b',  # FLUX 2 Klein 9B
     'flux2-dev': 'flux2-dev',  # FLUX 2 Dev
+    'phoenix-infip': 'phoenix',  # Phoenix 1.0 (with -infip suffix)
+    'lucid-origin': 'lucid-origin',  # Lucid Origin
+    'sdxl-infip': 'sdxl',  # SDXL (with -infip suffix)
+    'sdxl-lite-infip': 'sdxl-lite',  # SDXL Lite (with -infip suffix)
+    'img3': 'img3',  # Imagen 3
+    'img4': 'img4',  # Imagen 4
+    'flux-schnell-infip': 'flux-schnell',  # FLUX Schnell (with -infip suffix)
+    
+    # Legacy naming (for backward compatibility - these will be mapped above anyway)
+    'phoenix': 'phoenix',  # Phoenix 1.0
+    'sdxl': 'sdxl',  # SDXL
+    'sdxl-lite': 'sdxl-lite',  # SDXL Lite
+    'flux-schnell': 'flux-schnell',  # FLUX Schnell
 }
 
 # deAPI Models - https://api.deapi.ai
@@ -280,8 +316,17 @@ CLIPDROP_MODELS = {
 
 # Frenix Image Models - https://api.frenix.sh/v1
 FRENIX_IMAGE_MODELS = {
+    # Existing models
     'frenix-dirtberry':  'provider-2/dirtberry',
     'frenix-flux-2-pro': 'provider-2/flux-2-pro',
+    # New Frenix models
+    'frenix-z-image': 'provider-2/z-image',
+    'frenix-imagen-2': 'provider-2/imagen-2',
+    'frenix-imagen-4': 'provider-2/imagen-4',
+    'frenix-flux-2-flex': 'provider-2/flux-2-flex',
+    'frenix-flux-2-dev': 'provider-2/flux-2-dev',
+    'frenix-flux-klein-4b': 'provider-2/flux-klein-4b',
+    'frenix-flux-klein-9b': 'provider-2/flux-klein-9b',
 }
 
 # AICC Image Models - https://api.ai.cc/v1
@@ -299,6 +344,138 @@ AICC_VIDEO_MODELS = {
 FELO_MODELS = {
     'nano-banana-2': 'nano-banana-2',
 }
+
+# Gemini Image Models - https://ai.google.dev/gemini-api/docs/vision
+# Gemini 2.5 Flash Image - supports text-to-image and image editing
+GEMINI_IMAGE_MODELS = {
+    'gemini-25-flash-image': 'gemini-2.5-flash-image',
+}
+
+# Gemini Web API Models - https://github.com/HanaokaYuzu/Gemini-API (reverse-engineered)
+# Uses dual cookies (secure_1psid + secure_1psidts) stored as JSON in api_key field
+# Supports text-to-image and image editing with natural language prompts
+# Available models from API: gemini-3-pro, gemini-3-flash, gemini-3-flash-thinking, etc.
+GEMINI_WEB_API_MODELS = {
+'gemini-2.5-flash-image-web': 'gemini-3-flash', # Map to gemini-3-flash (Nano Banana)
+'gemini-3.1-flash-image-web': 'gemini-3-flash', # Map to gemini-3-flash (Nano Banana 2 - default)
+'gemini-1.5-flash-web': 'gemini-3-flash', # Map to gemini-3-flash
+'gemini-2.0-flash-web': 'gemini-3-flash', # Map to gemini-3-flash
+'gemini-2.5-pro-web': 'gemini-3-pro', # Map to gemini-3-pro (Pro quality)
+'gemini-3-pro-web': 'gemini-3-pro', # Best quality model ✅
+}
+
+# On-Demand API Models - https://api.on-demand.io
+# Uses API key + workflow ID with webhook callback for result delivery
+ONDEMAND_MODELS = {
+'nano-banana-ondemand': 'nano-banana',
+'nano-banana-2-ondemand': 'nano-banana-2',
+}
+
+def generate_with_gemini(prompt, model, aspect_ratio, api_key, input_image_url=None, job_type="image", duration=5):
+    """
+    Generate or edit an image using Google Gemini API.
+    
+    API: POST https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent
+    
+    Text-to-image: prompt only in the parts array.
+    Image editing: input_image_url can be a single URL string or a list of up to 3 URLs.
+    Multiple images are all sent as inlineData parts, enabling:
+      - Multi-image fusion (combine product from image 1 into background from image 2)
+      - Character consistency (multiple angles of same character)
+      - Style reference (subject from one image, style from another)
+    
+    Limits: Up to 3 input images; total request size (all images + text) <= 20MB.
+    """
+    import base64 as _base64
+    import io as _io
+    from PIL import Image as _Image
+    
+    gemini_model = GEMINI_IMAGE_MODELS.get(model, model)
+    BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+    # Gemini API requires the key as a query parameter, NOT as a Bearer token
+    HEADERS = {
+        "Content-Type": "application/json",
+    }
+    
+    # Build parts - always include the prompt
+    parts = [{"text": prompt}]
+    
+    # If input image(s) provided, normalize to list and convert each to base64
+    if input_image_url:
+        # Normalize: accept single URL string or list of URLs (up to 3)
+        input_urls = input_image_url if isinstance(input_image_url, list) else [input_image_url]
+        input_urls = [u for u in input_urls if u]  # filter out None/empty
+        input_urls = input_urls[:3]  # Gemini 2.0/2.5 Flash supports up to 3 input images
+        
+        for idx, img_url in enumerate(input_urls):
+            try:
+                # Download image
+                img_response = requests.get(img_url, timeout=30)
+                img_response.raise_for_status()
+                
+                # Determine format from URL/content
+                content_type = img_response.headers.get('Content-Type', 'image/png')
+                if 'jpeg' in content_type.lower() or 'jpg' in content_type.lower():
+                    mime_type = "image/jpeg"
+                elif 'png' in content_type.lower():
+                    mime_type = "image/png"
+                elif 'webp' in content_type.lower():
+                    mime_type = "image/webp"
+                else:
+                    mime_type = "image/png"
+                
+                # Convert to base64
+                b64_data = _base64.b64encode(img_response.content).decode('utf-8')
+                parts.append({
+                    "inlineData": {
+                        "mimeType": mime_type,
+                        "data": b64_data
+                    }
+                })
+            except Exception as e:
+                raise Exception(f"Failed to process input image {idx + 1} for Gemini: {str(e)}")
+    
+    # Normalize aspect ratio to supported values
+    # gemini-2.0-flash-preview-image-generation supports: 1:1, 3:4, 4:3, 9:16, 16:9
+    supported_ratios = {"1:1", "3:4", "4:3", "9:16", "16:9"}
+    gemini_aspect = aspect_ratio if aspect_ratio in supported_ratios else "1:1"
+    
+    payload = {
+        "contents": [{"role": "user", "parts": parts}],
+        "generationConfig": {
+            "responseModalities": ["TEXT", "IMAGE"],
+        },
+    }
+    
+    # API key passed as query parameter (Gemini REST API requirement)
+    url = f"{BASE_URL}/models/{gemini_model}:generateContent?key={api_key}"
+    
+    try:
+        resp = requests.post(url, headers=HEADERS, json=payload, timeout=180)
+        
+        if resp.status_code != 200:
+            raise Exception(f"Gemini API error {resp.status_code}: {resp.text}")
+        
+        result = resp.json()
+        
+        # Extract base64 image from response
+        for candidate in result.get("candidates", []):
+            for part in candidate.get("content", {}).get("parts", []):
+                inline = part.get("inlineData", {})
+                if inline.get("data"):
+                    return {
+                        "success": True,
+                        "data": inline["data"],
+                        "type": "image",
+                        "is_base64": True
+                    }
+        
+        raise Exception("Gemini response contained no image data")
+        
+    except requests.exceptions.Timeout:
+        raise Exception("Gemini API request timed out")
+    except requests.exceptions.RequestException as e:
+        raise Exception(f"Gemini API request failed: {str(e)}")
 
 # Vercel AI Gateway Models - https://ai-gateway.vercel.sh/v1
 # xAI Grok Imagine models via Vercel AI Gateway (separate from KIE-based grok models)
@@ -353,11 +530,11 @@ ENDPOINT_IMAGE_INPUT_SUPPORT = {
         'requires_image': True,
         'notes': 'All Bria Cinematic models REQUIRE video input (passed as input_image_url).',
     },
-    'xeven': {
+    'custom': {
         'supported': True,
-        'notes': 'Only sdxl and sdxl-lightning support img2img via image_b64. flux-schnell, lucid-origin, phoenix are text-to-image only and will raise an error if image is provided.',
-        'models_supporting_image': ['sdxl-lightning', 'sdxl'],
-        'models_not_supporting_image': ['flux-schnell', 'lucid-origin', 'phoenix'],
+        'notes': 'Only sdxl-custom supports img2img via POST /img2img. Other models are text-to-image only.',
+        'models_supporting_image': ['sdxl-custom'],
+        'models_not_supporting_image': ['flux-fast-custom', 'sdxl-fast-custom', 'leonardo-custom', 'phoenix-custom'],
     },
     'infip': {
         'supported': False,
@@ -400,6 +577,32 @@ ENDPOINT_IMAGE_INPUT_SUPPORT = {
         'notes': 'nano-banana-2 supports both text-to-image and image editing. Image passed as base64 data URL.',
         'models_supporting_image': ['nano-banana-2'],
     },
+    'gemini': {
+        'supported': True,
+        'notes': 'gemini-2.5-flash-image supports text-to-image and img2img. Accepts up to 3 input images as inlineData parts. Total request size (all images + text) <= 20MB.',
+        'max_input_images': 3,
+        'models_supporting_image': ['gemini-25-flash-image'],
+        'use_cases': [
+            'Multi-image fusion: combine product from image 1 into background from image 2',
+            'Character consistency: multiple angles of same character in new scene',
+            'Style reference: subject from one image, artistic style from another',
+        ],
+    },
+'geminiwebapi': {
+'supported': True,
+'notes': 'Gemini Web API (reverse-engineered) supports text-to-image and img2img via natural language. Accepts up to 3 input images. Uses dual cookies (secure_1psid + secure_1psidts). Auto-refresh enabled.',
+'max_input_images': 3,
+'models_supporting_image': ['gemini-2.5-flash-image-web', 'gemini-3.1-flash-image-web', 'gemini-1.5-flash-web', 'gemini-2.0-flash-web', 'gemini-2.5-pro-web', 'gemini-3-pro-web'],
+'use_cases': [
+'Multi-image fusion: combine elements from multiple images',
+'Style transfer: apply artistic style from reference image',
+'Image editing: modify existing image with natural language (use "Edit" or "Modify" in prompt)',
+],
+},
+'ondemand': {
+'supported': False,
+'notes': 'On-Demand API is text-to-image only. Uses webhook for result delivery. Stores API key + workflow_id as JSON.',
+},
 }
 
 
@@ -412,7 +615,7 @@ PROVIDER_ROUTING = {
     'vision-flux': 'kie',
     'vision-removebg': 'removebg',
     'vision-bria': 'bria_vision',
-    'vision-xeven': 'xeven',
+    'vision-custom': 'custom',
     'vision-infip': 'infip',
     'vision-deapi': 'deapi',
     'cinematic-deapi': 'deapi',
@@ -429,7 +632,10 @@ PROVIDER_ROUTING = {
     'vision-frenix':    'frenix',
     'vision-aicc':      'aicc',
     'cinematic-aicc':   'aicc',
-    'vision-felo':      'felo',
+'vision-felo': 'felo',
+'vision-gemini': 'gemini',
+'vision-geminiwebapi': 'geminiwebapi', # NEW: Gemini Web API (reverse-engineered)
+'vision-ondemand': 'ondemand', # NEW: On-Demand API (webhook-based)
 }
 
 
@@ -441,7 +647,7 @@ PROVIDER_ALLOWED_IMAGE_FORMATS = {
     'vision-flux':          ['jpg', 'jpeg', 'png', 'webp'],
     'vision-removebg':      ['jpg', 'jpeg', 'png', 'webp'],
     'vision-bria':          ['jpg', 'jpeg', 'png', 'webp'],
-    'vision-xeven':         ['jpg', 'jpeg', 'png', 'webp'],
+    'vision-custom':        ['jpg', 'jpeg', 'png', 'webp'],
     'vision-leonardo':      ['jpg', 'jpeg', 'png', 'webp', 'gif'],
     'vision-stabilityai':   ['jpg', 'jpeg', 'png', 'webp'],
     'vision-atlas':         [],
@@ -461,6 +667,8 @@ PROVIDER_ALLOWED_IMAGE_FORMATS = {
     'vision-aicc':          ['jpg', 'jpeg', 'png', 'webp'],
     'cinematic-aicc':       ['jpg', 'jpeg', 'png', 'webp'],
     'vision-felo':          [],
+'vision-geminiwebapi': ['jpg', 'jpeg', 'png', 'webp'], # NEW: Accepts images for editing (img2img)
+'vision-ondemand': [], # NEW: Text-to-image only, webhook-based
 }
 
 
@@ -533,8 +741,8 @@ def get_endpoint_type(provider_key, model_name=None):
             return 'bria_vision'
         if model_name in BRIA_CINEMATIC_MODELS:
             return 'bria_cinematic'
-        if model_name in XEVEN_MODELS:
-            return 'xeven'
+        if model_name in CUSTOM_MODELS:
+            return 'custom'
         if model_name in INFIP_MODELS:
             return 'infip'
         if model_name in DEAPI_MODELS:
@@ -555,6 +763,10 @@ def get_endpoint_type(provider_key, model_name=None):
             return 'aicc'
         if model_name in FELO_MODELS:
             return 'felo'
+        if model_name in GEMINI_WEB_API_MODELS:
+            return 'geminiwebapi'
+        if model_name in ONDEMAND_MODELS:
+            return 'ondemand'
     return 'replicate'
 
 
@@ -1275,165 +1487,124 @@ def generate_with_rapidapi(prompt, model, aspect_ratio, api_key, input_image_url
         raise Exception(f"RapidAPI generation failed: {str(e)}")
 
 
-def generate_with_xeven(prompt, model, aspect_ratio, api_key=None, input_image_url=None, job_type="image", duration=5):
+def generate_with_custom(prompt, model, aspect_ratio, api_key, input_image_url=None, job_type="image", duration=5):
     """
-    Generate images using Xeven Free API (NO API KEY REQUIRED)
-    https://ai-image-api.xeven.workers.dev/img
+    Generate images using our own Cloudflare Workers AI deployment.
+    api_key IS the endpoint URL (e.g. https://my-worker.workers.dev).
+    Multiple endpoint URLs are stored in Supabase and rotated on rate limit.
+
+    Endpoints:
+    - GET  /generate  — text to image
+    - POST /img2img   — image to image (multipart/form-data)
+
+    Models & Steps (per MASTER MODEL PLAN):
+    - flux_fast:     1:1=8,  16:9=10, 9:16=10  (bulk)
+    - sdxl_fast:     1:1=6,  16:9=6,  9:16=6   (preview)
+    - flux_2_klein:  1:1=22, 16:9=24, 9:16=24  (balanced)
+    - flux_dev:      1:1=28, 16:9=30, 9:16=30  (high quality)
+    - flux_pro:      1:1=30, 16:9=32, 9:16=32  (premium)
+    - sdxl:          1:1=35, 16:9=38, 9:16=38  (detailed, supports img2img)
+    - leonardo:      1:1=25, 16:9=28, 9:16=28  (artistic)
+    - phoenix:       1:1=25, 16:9=28, 9:16=28  (cinematic)
     
-    Supports 5 models:
-    - sdxl-lightning: Fast, high-quality (< 5 secs), size 256-2048px
-    - sdxl: Balanced, professional (< 12 secs), size 256-2048px
-    - flux-schnell: Best realistic model (< 6 secs), size flexible
-    - lucid-origin: High-quality artistic, size 0-2500px, default 1120x1120
-    - phoenix: Professional-grade (25 steps), size 0-2048px, default 1024x1024
-    
-    All models support negative prompts except flux-schnell.
-    SDXL variants support img2img via image_b64 parameter.
+    Only 3 aspect ratios supported: 1:1, 16:9, 9:16
     """
-    xeven_model = XEVEN_MODELS.get(model, 'sdxl-lightning')
-    base_url = "https://ai-image-api.xeven.workers.dev/img"
+    if not api_key:
+        raise Exception("vision-custom: endpoint URL is missing. Add it to Supabase Worker1 provider_api_keys for provider 'custom'.")
+
+    cf_model = CUSTOM_MODELS.get(model, 'flux_fast')
+    endpoint_url = api_key.rstrip('/')
+
+    # Validate ratio - only 3 ratios supported for vision-custom
+    ratio = aspect_ratio if aspect_ratio in CUSTOM_MODEL_RATIOS else "1:1"
     
-    print(f"[Xeven] Running model: {xeven_model} (internal: {xeven_model})")
-    print(f"[Xeven] Aspect ratio: {aspect_ratio}")
-    print(f"[Xeven] FREE API - No API key required")
-    
-    # Map aspect ratios to dimensions based on model constraints
-    # Lucid Origin: 0-2500px, default 1120x1120
-    # Phoenix: 0-2048px, default 1024x1024
-    # SDXL/Lightning: 256-2048px
-    # Flux Schnell: flexible
-    
-    if xeven_model == 'lucid-origin':
-        aspect_map = {
-            "1:1": {"width": 1120, "height": 1120},
-            "16:9": {"width": 1920, "height": 1080},
-            "9:16": {"width": 1080, "height": 1920},
-            "4:3": {"width": 1600, "height": 1200},
-            "3:4": {"width": 1200, "height": 1600},
-            "3:2": {"width": 1680, "height": 1120},
-            "2:3": {"width": 1120, "height": 1680},
-        }
-    elif xeven_model == 'phoenix':
-        aspect_map = {
-            "1:1": {"width": 1024, "height": 1024},
-            "16:9": {"width": 1792, "height": 1008},
-            "9:16": {"width": 1008, "height": 1792},
-            "4:3": {"width": 1536, "height": 1152},
-            "3:4": {"width": 1152, "height": 1536},
-            "3:2": {"width": 1536, "height": 1024},
-            "2:3": {"width": 1024, "height": 1536},
-        }
-    else:  # SDXL, SDXL Lightning, Flux Schnell
-        aspect_map = {
-            "1:1": {"width": 1024, "height": 1024},
-            "16:9": {"width": 1536, "height": 864},
-            "9:16": {"width": 864, "height": 1536},
-            "4:3": {"width": 1536, "height": 1152},
-            "3:4": {"width": 1152, "height": 1536},
-            "3:2": {"width": 1536, "height": 1024},
-            "2:3": {"width": 1024, "height": 1536},
-        }
-    
-    dimensions = aspect_map.get(aspect_ratio, {"width": 1024, "height": 1024})
-    
-    # Build request parameters based on model
-    params = {
-        "prompt": prompt,
-        "model": xeven_model,
-        "height": dimensions["height"],
-        "width": dimensions["width"],
-    }
-    
-    # Model-specific parameters - Using maximum quality settings
-    if xeven_model == 'lucid-origin':
-        params["guidance"] = 10  # Max guidance for Lucid Origin (0-10)
-        params["num_steps"] = 40  # Max steps for best quality (1-40)
-    elif xeven_model == 'phoenix':
-        params["guidance"] = 10  # Max guidance for Phoenix (2-10)
-        params["num_steps"] = 50  # Max steps for best quality (1-50)
-        params["negative_prompt"] = "blurry, low quality, distorted, ugly, bad anatomy"
-    elif xeven_model == 'flux-schnell':
-        params["steps"] = 8  # Max steps for best quality (1-8)
-    elif xeven_model in ['sdxl-lightning', 'sdxl']:
-        params["guidance"] = 7.5  # Optimal guidance scale
-        params["num_steps"] = 20  # Max steps (1-20)
-        params["negative_prompt"] = "blurry, low quality, distorted, ugly, bad anatomy"
-        params["strength"] = 1.0  # Full strength by default
-    
-    # Add image_b64 for img2img if input_image_url provided
-    # Only SDXL and SDXL Lightning support img2img
-    if input_image_url and xeven_model in ['sdxl-lightning', 'sdxl']:
-        validate_image_format(input_image_url, ['jpg', 'jpeg', 'png', 'webp'], '[Xeven]')
-        try:
-            print(f"[Xeven] Fetching input image for img2img: {input_image_url}")
-            img_response = requests.get(input_image_url, timeout=30)
-            if img_response.status_code == 200:
-                b64_img = base64.b64encode(img_response.content).decode('utf-8')
-                params["image_b64"] = b64_img
-                params["strength"] = 0.75  # Moderate transformation for img2img
-                print(f"[Xeven] Added img2img support with strength 0.75")
-            else:
-                print(f"[Xeven] Warning: Failed to fetch input image (status {img_response.status_code})")
-        except Exception as e:
-            print(f"[Xeven] Warning: Failed to process input image: {e}")
-    elif input_image_url:
-        print(f"[Xeven] WARNING: Model {xeven_model} does not support image input (only sdxl and sdxl-lightning support img2img). Input image will be rejected.")
-        raise Exception(f"IMAGE_NOT_SUPPORTED: Xeven model '{xeven_model}' does not support image input. Only 'sdxl' and 'sdxl-lightning' models support img2img. Please switch to sdxl-xeven or sdxl-lightning-xeven, or use a different endpoint.")
-    
-    print(f"[Xeven] Request URL: {base_url}")
-    print(f"[Xeven] Request params: {params}")
-    
+    # Get steps based on model and ratio from MASTER MODEL PLAN
+    model_steps_config = CUSTOM_MODEL_STEPS.get(cf_model, {'1:1': 20, '16:9': 22, '9:16': 22})
+    steps = model_steps_config.get(ratio, 20)
+
+    print(f"[Custom] Running model: {cf_model} (from: {model})")
+    print(f"[Custom] Endpoint: {endpoint_url}")
+    print(f"[Custom] Aspect ratio: {ratio}")
+    print(f"[Custom] Steps: {steps}")
+
     try:
-        response = requests.get(
-            base_url,
-            params=params,
-            timeout=120  # 2 minutes max (API is fast, but be safe)
-        )
-        
-        print(f"[Xeven] Response status: {response.status_code}")
-        print(f"[Xeven] Response content-type: {response.headers.get('Content-Type', 'unknown')}")
-        
+        if input_image_url and cf_model == 'sdxl':
+            # img2img via POST /img2img (multipart/form-data)
+            validate_image_format(input_image_url, ['jpg', 'jpeg', 'png', 'webp'], '[Custom]')
+            print(f"[Custom] img2img mode — fetching input image: {input_image_url}")
+            img_response = requests.get(input_image_url, timeout=30)
+            if img_response.status_code != 200:
+                raise Exception(f"Failed to fetch input image (status {img_response.status_code})")
+            image_bytes = img_response.content
+
+            files = {'image': ('image.png', image_bytes, 'image/png')}
+            params = {
+                'prompt': prompt,
+                'model': cf_model,
+                'ratio': ratio,
+                'steps': steps,
+                'quality': 'high',
+                'strength': '0.75',
+            }
+            print(f"[Custom] POST {endpoint_url}/img2img params={params}")
+            response = requests.post(
+                f"{endpoint_url}/img2img",
+                params=params,
+                files=files,
+                timeout=120
+            )
+        elif input_image_url:
+            raise Exception(f"IMAGE_NOT_SUPPORTED: Custom model '{cf_model}' does not support image input. Only 'sdxl-custom' supports img2img.")
+        else:
+            # text-to-image via GET /generate
+            params = {
+                'prompt': prompt,
+                'model': cf_model,
+                'ratio': ratio,
+                'steps': steps,
+                'quality': 'high',
+            }
+            print(f"[Custom] GET {endpoint_url}/generate params={params}")
+            response = requests.get(
+                f"{endpoint_url}/generate",
+                params=params,
+                timeout=120
+            )
+
+        print(f"[Custom] Response status: {response.status_code}")
+        print(f"[Custom] Content-Type: {response.headers.get('Content-Type', 'unknown')}")
+
         if response.status_code != 200:
-            error_msg = f"Xeven API error {response.status_code}"
-            # Try to extract error message from response
+            error_msg = f"Custom API error {response.status_code}"
             try:
                 error_data = response.json()
                 if isinstance(error_data, dict) and 'error' in error_data:
                     error_msg += f": {error_data['error']}"
                 else:
                     error_msg += f": {response.text[:200]}"
-            except:
+            except Exception:
                 error_msg += f": {response.text[:200]}"
-            
-            print(f"[Xeven] Error: {error_msg}")
+            print(f"[Custom] Error: {error_msg}")
             raise Exception(error_msg)
-        
-        # Response is binary image data (PNG format)
+
         content_type = response.headers.get('Content-Type', '')
-        
         if 'image' in content_type or len(response.content) > 1000:
-            # Binary image response
             image_data = response.content
             b64_data = base64.b64encode(image_data).decode('utf-8')
-            print(f"[Xeven] Success! Returning base64 image data ({len(image_data)} bytes, {len(b64_data)} chars)")
+            print(f"[Custom] Success! {len(image_data)} bytes → base64 {len(b64_data)} chars")
             return {"success": True, "data": b64_data, "type": "image", "is_base64": True}
         else:
-            # Unexpected response format
-            raise Exception(f"Xeven API returned unexpected content type: {content_type}. Response: {response.text[:200]}")
-        
+            raise Exception(f"Custom API returned unexpected content type: {content_type}. Response: {response.text[:200]}")
+
     except requests.exceptions.Timeout:
-        error_msg = "Xeven API request timeout after 120 seconds"
-        print(f"[Xeven] Error: {error_msg}")
-        raise Exception(error_msg)
+        raise Exception("Custom API request timeout after 120 seconds")
     except requests.exceptions.ConnectionError as e:
-        error_msg = f"Xeven API connection error: {str(e)}"
-        print(f"[Xeven] Error: {error_msg}")
-        raise Exception(error_msg)
+        raise Exception(f"Custom API connection error: {str(e)}")
     except Exception as e:
-        print(f"[Xeven] Error: {str(e)}")
+        print(f"[Custom] Error: {str(e)}")
         import traceback
         traceback.print_exc()
-        raise Exception(f"Xeven generation failed: {str(e)}")
+        raise Exception(f"Custom generation failed: {str(e)}")
 
 
 def generate_with_infip(prompt, model, aspect_ratio, api_key, input_image_url=None, job_type="image", duration=5):
@@ -1441,13 +1612,20 @@ def generate_with_infip(prompt, model, aspect_ratio, api_key, input_image_url=No
     Generate images using Infip.pro API (OpenAI-compatible endpoint)
     https://api.infip.pro/v1/images/generations
     
-    Supports 4 models (async models require polling):
-    - z-image-turbo: Fast async model
-    - qwen: Qwen async model
-    - flux2-klein-9b: FLUX 2 Klein 9B
-    - flux2-dev: FLUX 2 Dev
-    
-    API returns task_id for async models, which requires polling via GET /v1/tasks/{task_id}
+    Supports 11 models:
+    - Async models (require polling via /v1/tasks/{task_id}):
+      - z-image-turbo: Fast async model
+      - qwen: Qwen async model
+    - Sync models (return URL directly):
+      - flux2-klein-9b: FLUX 2 Klein 9B
+      - flux2-dev: FLUX 2 Dev
+      - phoenix: Phoenix
+      - lucid-origin: Lucid Origin
+      - sdxl: SDXL
+      - sdxl-lite: SDXL Lite
+      - img3: Imagen 3
+      - img4: Imagen 4
+      - flux-schnell: FLUX Schnell
     
     IMAGE INPUT: NOT SUPPORTED - All Infip models use text-to-image via /images/generations only.
     """
@@ -3779,11 +3957,14 @@ def generate_with_frenix_image(prompt, model, aspect_ratio, api_key, input_image
         if not data:
             raise Exception("Frenix returned no image data")
 
-        image_url = data[0].get("url")
-        if not image_url:
-            raise Exception("Frenix image response missing url")
-
-        return {"success": True, "url": image_url, "type": "image"}
+        item = data[0]
+        if item.get("b64_json"):
+            print(f"[Frenix] Response contains b64_json, returning as base64")
+            return {"success": True, "data": item["b64_json"], "type": "image", "is_base64": True}
+        elif item.get("url"):
+            return {"success": True, "url": item["url"], "type": "image"}
+        else:
+            raise Exception("Frenix image response missing url and b64_json")
 
     except Exception as e:
         print(f"[Frenix] Error: {str(e)}")
@@ -4446,9 +4627,9 @@ def generate_with_felo(prompt, model, aspect_ratio, api_key, input_image_url=Non
         _socket.getaddrinfo = _orig_gai
 
 
-def generate(prompt, model, aspect_ratio, api_key, provider_key=None, input_image_url=None, job_type="image", duration=5, **kwargs):
+def generate(prompt, model, aspect_ratio, api_key, provider_key=None, input_image_url=None, job_type="image", duration=5, job_id=None, **kwargs):
     endpoint_type = get_endpoint_type(provider_key, model)
-    
+
     print(f"[MultiEndpoint] Routing to: {endpoint_type.upper()}")
     print(f"[MultiEndpoint] Provider: {provider_key}")
     print(f"[MultiEndpoint] Model: {model}")
@@ -4546,12 +4727,12 @@ def generate(prompt, model, aspect_ratio, api_key, provider_key=None, input_imag
             duration=duration,
             **kwargs
         )
-    elif endpoint_type == "xeven":
-        return generate_with_xeven(
+    elif endpoint_type == "custom":
+        return generate_with_custom(
             prompt=prompt,
             model=model,
             aspect_ratio=aspect_ratio,
-            api_key=None,  # Xeven doesn't need API key
+            api_key=api_key,
             input_image_url=input_image_url,
             job_type=job_type,
             duration=duration
@@ -4655,6 +4836,93 @@ def generate(prompt, model, aspect_ratio, api_key, provider_key=None, input_imag
             job_type=job_type,
             duration=duration
         )
+    elif endpoint_type == "gemini":
+        return generate_with_gemini(
+            prompt=prompt,
+            model=model,
+            aspect_ratio=aspect_ratio,
+            api_key=api_key,
+            input_image_url=input_image_url,
+            job_type=job_type,
+            duration=duration
+        )
+    elif endpoint_type == "geminiwebapi":
+        # Gemini Web API - uses dual cookies (async wrapper)
+        import asyncio
+        import sys
+        import os
+        # Add backend to path for import
+        backend_path = os.path.dirname(os.path.abspath(__file__))
+        if backend_path not in sys.path:
+            sys.path.insert(0, backend_path)
+        from gemini_webapi_client import generate_with_gemini_web
+
+        # Normalize input images to list
+        input_images = None
+        if input_image_url:
+            input_images = [input_image_url] if isinstance(input_image_url, str) else input_image_url
+
+        # Map frontend model names to actual Gemini Web API model names
+        gemini_model = GEMINI_WEB_API_MODELS.get(model, model)
+
+        # Create new event loop for async execution (avoid loop conflicts)
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            result = loop.run_until_complete(generate_with_gemini_web(
+                prompt=prompt,
+                model=gemini_model,
+                aspect_ratio=aspect_ratio,
+                input_images=input_images,
+                provider_key=provider_key or "vision-geminiwebapi"
+            ))
+            return result
+        except Exception as e:
+            raise Exception(f"Gemini Web API error: {str(e)}")
+        finally:
+            loop.close()
+    elif endpoint_type == "ondemand":
+        # Determine if using Agent API (sync mode) or Workflow API (webhook mode)
+        from provider_api_keys import get_provider_api_key
+        import json
+        cred_record = get_provider_api_key(provider_key or "vision-ondemand")
+        raw_json = cred_record.get("api_key") if cred_record else None
+        use_agent_api = False
+        if raw_json:
+            try:
+                data = json.loads(raw_json)
+                if "agent_ids" in data:
+                    use_agent_api = True
+            except Exception:
+                pass
+        if use_agent_api:
+            from ondemand_agent_provider import generate_with_ondemand_agent
+            return generate_with_ondemand_agent(
+                prompt=prompt,
+                model=model,
+                aspect_ratio=aspect_ratio,
+                api_key=api_key,
+                input_image_url=input_image_url,
+                job_type=job_type,
+                duration=duration,
+                provider_key=provider_key or "vision-ondemand",
+                job_id=job_id,
+                use_direct_agent=True,  # Use direct Nano Banana PRO when images provided
+                **kwargs,
+            )
+        else:
+            from ondemand_provider import generate_with_ondemand
+            return generate_with_ondemand(
+                prompt=prompt,
+                model=model,
+                aspect_ratio=aspect_ratio,
+                api_key=api_key,
+                input_image_url=input_image_url,
+                job_type=job_type,
+                duration=duration,
+                provider_key=provider_key or "vision-ondemand",
+                job_id=job_id,
+            )
     else:
         raise Exception(f"Unsupported endpoint type: {endpoint_type}")
 
@@ -4686,27 +4954,35 @@ class EndpointManager:
         """
         import asyncio
         from provider_api_keys import get_api_key_for_job
-        from api_key_rotation import handle_api_key_rotation, handle_roundrobin_rotation, should_rotate_key, NO_DELETE_ROTATE_PROVIDERS
+        from api_key_rotation import handle_api_key_rotation, handle_roundrobin_rotation, should_rotate_key
+        from provider_constants import NO_DELETE_ROTATE_PROVIDERS
         
         print(f"🔍 [EndpointManager] generate_image - provider_key: {provider_key}, model: {model}")
         
         use_roundrobin = provider_key in NO_DELETE_ROTATE_PROVIDERS
         max_rotation_attempts = 5
         attempt = 0
-        
+        _next_api_key_data = None  # carries rotated key into next loop iteration
+
         while attempt < max_rotation_attempts:
             attempt += 1
-            
-            api_key_data = get_api_key_for_job(model, provider_key=provider_key, job_type='image')
-            
+
+            # Use pre-rotated key if available (skip re-fetch which would reset round-robin)
+            if _next_api_key_data:
+                api_key_data = _next_api_key_data
+                _next_api_key_data = None
+                print(f"[EndpointManager] Using pre-rotated key (id={api_key_data.get('id')})")
+            else:
+                api_key_data = get_api_key_for_job(model, provider_key=provider_key, job_type='image')
+
             if not api_key_data:
                 error_msg = f"NO_API_KEY_AVAILABLE: No API keys found for provider '{provider_key}'"
                 print(f"[EndpointManager] {error_msg}")
                 raise Exception(error_msg)
-            
+
             api_key = api_key_data.get('api_key')
             api_key_id = api_key_data.get('id')
-            
+
             try:
                 loop = asyncio.get_event_loop()
                 result = await loop.run_in_executor(
@@ -4722,16 +4998,16 @@ class EndpointManager:
                         **kwargs
                     )
                 )
-                
+
                 return result
-                
+
             except Exception as e:
                 error_message = str(e)
                 print(f"[EndpointManager] Generation error (attempt {attempt}/{max_rotation_attempts}): {error_message}")
-                
+
                 if should_rotate_key(error_message, provider_key):
                     print(f"[EndpointManager] Error requires key rotation, attempting...")
-                    
+
                     if use_roundrobin:
                         print(f"[EndpointManager] Provider '{provider_key}' uses roundrobin (no key deletion)")
                         rotation_success, next_key = handle_roundrobin_rotation(
@@ -4747,9 +5023,10 @@ class EndpointManager:
                             error_message,
                             job_id=job_id or f"workflow-{model}"
                         )
-                    
+
                     if rotation_success and next_key:
-                        print(f"[EndpointManager] Rotation successful, retrying with new key...")
+                        print(f"[EndpointManager] Rotation successful, retrying with key #{next_key.get('key_number')}...")
+                        _next_api_key_data = next_key  # use directly, don't re-fetch
                         continue
                     else:
                         print(f"[EndpointManager] Rotation failed or no keys available")
@@ -4757,7 +5034,7 @@ class EndpointManager:
                 else:
                     print(f"[EndpointManager] Error doesn't require rotation, re-raising...")
                     raise
-        
+
         raise Exception(f"Generation failed after {max_rotation_attempts} rotation attempts")
     
     async def generate_video(self, prompt, model, provider_key, input_image_url=None, duration=5, job_id=None, **kwargs):

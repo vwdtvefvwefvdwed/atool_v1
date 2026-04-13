@@ -13,7 +13,7 @@
   },
   "supported_models": {
     "image_edit": [
-      "gemini-25-flash-aicc"
+      "nano-banana-ondemand"
     ],
     "upscale": [
       "clipdrop-upscale"
@@ -33,8 +33,8 @@
       "type": "generation",
       "description": "AI-powered GOT dragon rider transformation",
       "model_type": "image",
-      "default_model": "gemini-25-flash-aicc",
-      "provider": "vision-aicc"
+      "default_model": "nano-banana-ondemand",
+      "provider": "vision-ondemand"
     },
     {
       "id": 2,

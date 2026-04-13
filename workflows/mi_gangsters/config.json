@@ -1,0 +1,53 @@
+{
+  "id": "mi-gangsters",
+  "name": "MI Gangsters",
+  "description": "Put your face into the iconic MI gangsters squad photo — AI face swap with seamless identity preservation + fast 4x upscale (2 credits)",
+  "icon": "🏏",
+  "category": "sports",
+  "preview_video": null,
+  "preview_thumbnail": null,
+  "enabled": true,
+  "default_prompts": {
+    "image_edit_male": "DO NOT generate a new image. DO NOT recreate or reimagine anything. Use the exact provided reference image as the base and perform a minimal localized edit only.\n\nThe reference image must remain 100% identical everywhere except the front-center selfie player. Keep every background player, court, jerseys, logos, hands, arms, and all surrounding elements exactly as they appear in the reference image — pixel perfect and unchanged.\n\nOnly edit the front-center selfie player (closest to camera, wide open smile, arms stretched out). Replace his face with the identity from Image A. Align the face precisely to match the existing head position, selfie camera angle, perspective, and scale. Match the wide open smile expression and eye direction from the reference image exactly. Blend skin tone, lighting, shadows, and texture seamlessly so the face looks naturally embedded — not pasted. No visible seams, halos, or color mismatch at face edges. Preserve beard and hair from Image A and blend naturally into the neck and jaw.\n\nEdit only the face of the front-center player. Touch nothing else.",
+    "image_edit_female": "DO NOT generate a new image. DO NOT recreate or reimagine anything. Use the exact provided reference image as the base and perform a minimal localized edit only.\n\nThe reference image must remain 100% identical everywhere except the front-center selfie player. Keep every background player, court, jerseys, logos, and all surrounding elements exactly as they appear in the reference image — pixel perfect and unchanged.\n\nOnly edit the front-center selfie player (closest to camera, wide open smile, arms stretched out). Make the following changes to this person only:\n\nFace: Replace his face with the female identity from Image A. Align the face precisely to match the existing head position, selfie camera angle, perspective, and scale. Match the wide open smile expression and eye direction from the reference image exactly. Completely remove all beard and stubble and replace with smooth clean female skin with zero shadow or residue. Soften the jawline and facial structure to match natural female proportions from Image A. Blend skin tone, lighting, shadows, and texture seamlessly so the face looks naturally embedded — not pasted. No visible seams, halos, or color mismatch at face edges.\n\nArms and Hands: Slim both arms and hands to natural female proportions. Reduce arm thickness, slim the fingers, reduce knuckle prominence, and taper the wrists. Keep the exact same arm position and gesture — only reduce to feminine proportions.\n\nChest and Torso: Replace the flat male chest with a clearly visible natural female chest shape under the jersey. The jersey fabric should naturally conform and stretch over the female chest form. The torso silhouette must read as female — narrower waist and natural feminine curves. Keep all jersey details, logos, and colors exactly identical.\n\nBody Overall: The entire visible body of the front-center player must look like a natural female athlete — slim arms, female chest, feminine torso shape, and consistent female proportions throughout. Maintain the exact same pose, stretch, and camera angle.\n\nTouch nothing else outside the front-center selfie player. Every other player, the court, background, jerseys, logos, hands, and all surrounding elements must remain exactly identical to the reference image.",
+    "upscale": "Ultra high-resolution photorealistic cricket fan face swap, sharp focus, intricate details, cinematic quality, 8K, HDR"
+  },
+  "reference_image_b": "https://res.cloudinary.com/dnagl4r2t/image/upload/v1775980681/mi_final_d6qfmf.png",
+  "supported_models": {
+    "image_edit": [
+      "nano-banana-ondemand"
+    ],
+    "upscale": [
+      "clipdrop-upscale"
+    ]
+  },
+  "steps": [
+    {
+      "id": 0,
+      "name": "upload",
+      "type": "input",
+      "description": "Upload your face image",
+      "required_input": "image"
+    },
+    {
+      "id": 1,
+      "name": "image_edit",
+      "type": "generation",
+      "description": "AI-powered MI face swap with identity preservation",
+      "model_type": "image",
+      "default_model": "nano-banana-ondemand",
+      "provider": "vision-ondemand"
+    },
+    {
+      "id": 2,
+      "name": "upscale",
+      "type": "generation",
+      "description": "Fast upscale with Clipdrop (2 credits)",
+      "model_type": "image",
+      "default_model": "clipdrop-upscale",
+      "provider": "vision-clipdrop"
+    }
+  ],
+  "estimated_duration_seconds": 60,
+  "credits_cost": 27
+}
