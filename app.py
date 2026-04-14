@@ -1235,11 +1235,26 @@ def jobs_stream_status(job_id):
     # Create queue for this client
     client_queue = queue.Queue(maxsize=100)
 
-    # Subscribe BEFORE checking current state to avoid missing events between the two
+    # ============================================================
+    # CRITICAL: Subscribe BEFORE checking current state to avoid
+    # missing events between the DB fetch and subscription.
+    # Then re-check DB and drain any early events to handle the
+    # race window where a job completes before we subscribe.
+    # ============================================================
     realtime_manager = get_realtime_manager()
     print(f"   Realtime manager running: {realtime_manager.running}")
     realtime_manager.subscribe_to_job(job_id, client_queue)
     print(f"   Subscription registered\n")
+
+    # Re-fetch job status AFTER subscribing to catch completions
+    # that happened between the first fetch and now.
+    try:
+        fresh_response = supabase.table("jobs").select("*").eq("job_id", job_id).single().execute()
+        if fresh_response.data:
+            current_job = fresh_response.data
+            print(f"🔄 SSE catch-up: re-fetched job {job_id} status={current_job.get('status')}")
+    except Exception as e:
+        print(f"⚠️ Failed to re-fetch job {job_id}, using cached state: {e}")
 
     def generate():
         """Generate SSE events from shared realtime connection"""
@@ -1248,7 +1263,28 @@ def jobs_stream_status(job_id):
             yield f"event: connected\ndata: {json.dumps({'type': 'connected', 'job_id': job_id})}\n\n"
             print(f"📡 SSE connection event sent for job {job_id}")
 
-            # Immediately send current job state (catch-up: handles already-completed jobs)
+            # Drain any early realtime events that arrived before we sent catch-up
+            early_events = []
+            while True:
+                try:
+                    early_events.append(client_queue.get_nowait())
+                except queue.Empty:
+                    break
+
+            # If we captured an early event, use it as the source of truth
+            # instead of the DB snapshot (it's more recent).
+            if early_events:
+                last_early = early_events[-1]
+                early_job_data = (
+                    last_early.get('new') if isinstance(last_early, dict) else None
+                ) or (
+                    last_early.get('record') if isinstance(last_early, dict) else None
+                )
+                if early_job_data:
+                    current_job = early_job_data
+                    print(f"📥 Drained {len(early_events)} early event(s), using latest: status={current_job.get('status')}")
+
+            # Send current job state (catch-up: handles already-completed jobs)
             yield f"event: update\ndata: {json.dumps({'type': 'update', 'event': 'UPDATE', 'job': current_job})}\n\n"
             print(f"📤 SSE catch-up state sent: {job_id} status={current_job.get('status')}")
             if current_job.get("status") in ("completed", "failed", "cancelled"):
