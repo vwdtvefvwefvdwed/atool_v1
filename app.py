@@ -1256,33 +1256,32 @@ def jobs_stream_status(job_id):
     except Exception as e:
         print(f"⚠️ Failed to re-fetch job {job_id}, using cached state: {e}")
 
+    # Drain any early realtime events that arrived before we sent catch-up
+    # (they arrived between subscribe above and now).
+    early_events = []
+    while True:
+        try:
+            early_events.append(client_queue.get_nowait())
+        except queue.Empty:
+            break
+
+    if early_events:
+        last_early = early_events[-1]
+        early_job_data = (
+            last_early.get('new') if isinstance(last_early, dict) else None
+        ) or (
+            last_early.get('record') if isinstance(last_early, dict) else None
+        )
+        if early_job_data:
+            current_job = early_job_data
+            print(f"📥 Drained {len(early_events)} early event(s), using latest: status={current_job.get('status')}")
+
     def generate():
         """Generate SSE events from shared realtime connection"""
         try:
             # Send initial connection event
             yield f"event: connected\ndata: {json.dumps({'type': 'connected', 'job_id': job_id})}\n\n"
             print(f"📡 SSE connection event sent for job {job_id}")
-
-            # Drain any early realtime events that arrived before we sent catch-up
-            early_events = []
-            while True:
-                try:
-                    early_events.append(client_queue.get_nowait())
-                except queue.Empty:
-                    break
-
-            # If we captured an early event, use it as the source of truth
-            # instead of the DB snapshot (it's more recent).
-            if early_events:
-                last_early = early_events[-1]
-                early_job_data = (
-                    last_early.get('new') if isinstance(last_early, dict) else None
-                ) or (
-                    last_early.get('record') if isinstance(last_early, dict) else None
-                )
-                if early_job_data:
-                    current_job = early_job_data
-                    print(f"📥 Drained {len(early_events)} early event(s), using latest: status={current_job.get('status')}")
 
             # Send current job state (catch-up: handles already-completed jobs)
             yield f"event: update\ndata: {json.dumps({'type': 'update', 'event': 'UPDATE', 'job': current_job})}\n\n"
