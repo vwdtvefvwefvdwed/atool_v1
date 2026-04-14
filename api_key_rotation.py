@@ -621,11 +621,16 @@ def handle_roundrobin_rotation(
     error_message: str,
     job_id: str,
     current_api_key_id: Optional[int] = None,
+    current_key_number: Optional[int] = None,
 ) -> Tuple[bool, Optional[Dict[str, Any]]]:
     """
     Rotate to the next API key, deleting the current one only on credit_exceeded
     for providers in CREDIT_EXCEEDED_DELETE_PROVIDERS. For all other error types
     (rate limit, quota) the key is kept and rotation is round-robin only.
+
+    Args:
+        current_api_key_id: DB id of the failing key (preferred — used for deletion)
+        current_key_number: key_number of the failing key (fallback if id unavailable)
 
     Returns:
         Tuple of (success, next_api_key_data)
@@ -639,20 +644,32 @@ def handle_roundrobin_rotation(
     print(f"Provider: {provider_key}")
     print(f"Error Type: {error_type}")
     print(f"Error Message: {error_message}")
+    print(f"Current API Key ID: {current_api_key_id}")
+    print(f"Current Key Number: {current_key_number}")
     print(f"{'='*70}\n")
 
     # Record error in status table for cooldown tracking ONLY for NO_DELETE providers
     # All errors for these providers get 25 hour cooldown (no deletion)
     # CREDIT_EXCEEDED_DELETE_PROVIDERS still delete on credit_exceeded, so don't record for that case
-    should_record_error = provider_key in NO_DELETE_ROTATE_PROVIDERS
+    # Network errors should NEVER trigger cooldown or rotation - they are infrastructure issues
+    # Generic errors (unmatched patterns) should also NOT trigger cooldown - they may be transient
+    # Only record cooldown for known error types: limit_reached, credit_exceeded, monthly_limit
+    # Accept either current_api_key_id (preferred) or current_key_number (fallback) for identifying the key
+    key_number_for_record = current_key_number
+    if key_number_for_record is None and current_api_key_id is not None:
+        key_number_for_record = get_key_number_from_id(current_api_key_id)
+
+    should_record_error = (
+        provider_key in NO_DELETE_ROTATE_PROVIDERS
+        and error_type in ("limit_reached", "credit_exceeded", "monthly_limit")
+        and key_number_for_record is not None
+    )
     is_credit_delete_case = error_type == "credit_exceeded" and provider_key in CREDIT_EXCEEDED_DELETE_PROVIDERS
-    
-    if should_record_error and not is_credit_delete_case and current_api_key_id is not None:
-        key_number = get_key_number_from_id(current_api_key_id)
-        if key_number and error_type:
-            # All errors for NO_DELETE providers get 25 hour cooldown
-            api_key_status_manager.record_key_error(provider_key, key_number, error_type, error_message, NO_DELETE_COOLDOWN_SECONDS)
-            print(f"[RR-ROTATION] Recorded error for key #{key_number}, cooldown for 25 hours")
+
+    if should_record_error and not is_credit_delete_case:
+        # All errors for NO_DELETE providers get 25 hour cooldown
+        api_key_status_manager.record_key_error(provider_key, key_number_for_record, error_type, error_message, NO_DELETE_COOLDOWN_SECONDS)
+        print(f"[RR-ROTATION] Recorded error for key #{key_number_for_record}, cooldown for 25 hours")
 
     if not should_rotate_key(error_message, provider_key):
         print(f"[RR-ROTATION] Error type '{error_type}' does not require rotation")

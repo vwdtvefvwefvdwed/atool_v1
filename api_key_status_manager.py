@@ -42,6 +42,23 @@ def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _parse_timestamp(ts_string: str) -> Optional[datetime]:
+    """Parse an ISO timestamp string into a timezone-aware UTC datetime.
+
+    Handles both naive and aware datetime strings from Supabase.
+    """
+    if not ts_string:
+        return None
+    try:
+        dt = datetime.fromisoformat(ts_string)
+        # If naive (no tzinfo), assume UTC
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except (ValueError, TypeError):
+        return None
+
+
 def _get_provider_id(provider_key: str) -> Optional[int]:
     client = _get_status_client()
     if not client:
@@ -74,20 +91,24 @@ def _fetch_status(provider_id: int, key_number: int) -> Optional[Dict[str, Any]]
 
 
 def is_key_in_cooldown(provider_key: str, key_number: int) -> bool:
-    """Return True if ``cooldown_until`` is in the future."""
+    """Return True if ``cooldown_until`` is in the future or key is permanently disabled."""
     provider_id = _get_provider_id(provider_key)
     if provider_id is None:
         return False
     status = _fetch_status(provider_id, key_number)
     if not status:
         return False
+
+    # Check permanent disable flag
+    if status.get("is_permanently_disabled"):
+        return True
+
     cd = status.get("cooldown_until")
     if not cd:
         return False
     # Supabase returns ISO strings; compare with current UTC.
-    try:
-        cooldown_ts = datetime.fromisoformat(cd)
-    except Exception:
+    cooldown_ts = _parse_timestamp(cd)
+    if cooldown_ts is None:
         return False
     return cooldown_ts > _now_utc()
 
@@ -102,6 +123,10 @@ def record_key_error(
     """Save an error for a specific key and set a cooldown.
 
     ``cooldown_seconds`` determines how long the key is blocked from reuse.
+    If the key is already in cooldown, the cooldown_until is NOT extended —
+    only error counters are incremented. This prevents perpetual cooldown
+    when errors keep occurring; the key will be released after the original
+    cooldown period expires.
     """
     client = _get_status_client()
     if not client:
@@ -119,6 +144,17 @@ def record_key_error(
         # Increment counters based on existing row.
         consecutive = (existing.get("consecutive_errors") or 0) + 1
         total = (existing.get("total_errors") or 0) + 1
+
+        # Check if key is already in cooldown. If so, DON'T extend the cooldown —
+        # only update error counters and message. The original cooldown timer continues.
+        if cooldown_seconds:
+            existing_cd = existing.get("cooldown_until")
+            if existing_cd:
+                existing_cd_ts = _parse_timestamp(existing_cd)
+                if existing_cd_ts and existing_cd_ts > now:
+                    # Keep the existing cooldown — don't extend it
+                    cooldown_until = existing_cd
+
         update_data = {
             "last_error_type": error_type,
             "last_error_message": error_message,
@@ -149,7 +185,7 @@ def record_key_error(
 def clear_key_success(provider_key: str, key_number: int) -> bool:
     """Mark a key as successfully used.
 
-    Resets error counters and removes any cooldown.
+    Resets error counters, removes any cooldown, and clears stale error information.
     """
     client = _get_status_client()
     if not client:
@@ -167,6 +203,10 @@ def clear_key_success(provider_key: str, key_number: int) -> bool:
         "cooldown_until": None,
         "cooldown_duration_seconds": None,
         "consecutive_errors": 0,
+        # Clear stale error information - only repopulate when a new error occurs
+        "last_error_type": None,
+        "last_error_message": None,
+        "last_error_at": None,
     }
     client.table("api_key_status").update(update_data).eq("provider_id", provider_id).eq("key_number", key_number).execute()
     return True
@@ -202,12 +242,9 @@ def get_next_available_key(provider_key: str, provider_id: int, client) -> Optio
     for idx, kn in enumerate(key_numbers):
         cd = cooldown_map.get(kn)
         if cd:
-            try:
-                ts = datetime.fromisoformat(cd)
-                if ts > _now_utc():
-                    continue  # still in cooldown
-            except Exception:
-                pass
+            ts = _parse_timestamp(cd)
+            if ts and ts > _now_utc():
+                continue  # still in cooldown
         return idx  # index in the ordered list
     return None
 

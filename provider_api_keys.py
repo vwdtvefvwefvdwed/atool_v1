@@ -321,9 +321,9 @@ def map_model_to_provider(model_name: str, job_type: str = "image") -> Optional[
             "gemini-3.1-flash-image-web",
             "gemini-1.5-flash-web",
             "gemini-2.0-flash-web",
-        "gemini-2.5-pro-web",
-        "gemini-3-pro-web",
-    ],
+            "gemini-2.5-pro-web",
+            "gemini-3-pro-web",
+        ],
     "vision-ondemand": [
         "nano-banana-ondemand",
         "nano-banana-2-ondemand",

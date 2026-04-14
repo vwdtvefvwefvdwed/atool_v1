@@ -4982,6 +4982,7 @@ class EndpointManager:
 
             api_key = api_key_data.get('api_key')
             api_key_id = api_key_data.get('id')
+            api_key_number = api_key_data.get('key_number')
 
             try:
                 loop = asyncio.get_event_loop()
@@ -4998,6 +4999,11 @@ class EndpointManager:
                         **kwargs
                     )
                 )
+
+                # Clear cooldown/error status for NO_DELETE provider keys after successful use
+                if api_key_number is not None and provider_key in NO_DELETE_ROTATE_PROVIDERS:
+                    from provider_api_keys import clear_api_key_status
+                    clear_api_key_status(provider_key, int(api_key_number))
 
                 return result
 
@@ -5058,29 +5064,39 @@ class EndpointManager:
         """
         import asyncio
         from provider_api_keys import get_api_key_for_job
-        from api_key_rotation import handle_api_key_rotation, should_rotate_key
-        
+        from api_key_rotation import handle_api_key_rotation, handle_roundrobin_rotation, should_rotate_key
+        from provider_constants import NO_DELETE_ROTATE_PROVIDERS
+
         print(f"🔍 [EndpointManager] generate_video - provider_key: {provider_key}, model: {model}")
-        
+
         # Extract aspect_ratio from kwargs to avoid duplicate argument
         aspect_ratio = kwargs.pop('aspect_ratio', '16:9')
-        
+
+        use_roundrobin = provider_key in NO_DELETE_ROTATE_PROVIDERS
         max_rotation_attempts = 5
         attempt = 0
-        
+        _next_api_key_data = None  # carries rotated key into next loop iteration
+
         while attempt < max_rotation_attempts:
             attempt += 1
-            
-            api_key_data = get_api_key_for_job(model, provider_key=provider_key, job_type='video')
-            
+
+            # Use pre-rotated key if available (skip re-fetch which would reset round-robin)
+            if _next_api_key_data:
+                api_key_data = _next_api_key_data
+                _next_api_key_data = None
+                print(f"[EndpointManager] Using pre-rotated key (id={api_key_data.get('id')})")
+            else:
+                api_key_data = get_api_key_for_job(model, provider_key=provider_key, job_type='video')
+
             if not api_key_data:
                 error_msg = f"NO_API_KEY_AVAILABLE: No API keys found for provider '{provider_key}'"
                 print(f"[EndpointManager] {error_msg}")
                 raise Exception(error_msg)
-            
+
             api_key = api_key_data.get('api_key')
             api_key_id = api_key_data.get('id')
-            
+            api_key_number = api_key_data.get('key_number')
+
             try:
                 loop = asyncio.get_event_loop()
                 result = await loop.run_in_executor(
@@ -5097,25 +5113,40 @@ class EndpointManager:
                         **kwargs
                     )
                 )
-                
+
+                # Clear cooldown/error status for NO_DELETE provider keys after successful use
+                if api_key_number is not None and provider_key in NO_DELETE_ROTATE_PROVIDERS:
+                    from provider_api_keys import clear_api_key_status
+                    clear_api_key_status(provider_key, int(api_key_number))
+
                 return result
-                
+
             except Exception as e:
                 error_message = str(e)
                 print(f"[EndpointManager] Generation error (attempt {attempt}/{max_rotation_attempts}): {error_message}")
-                
+
                 if should_rotate_key(error_message, provider_key):
                     print(f"[EndpointManager] Error requires key rotation, attempting...")
-                    
-                    rotation_success, next_key = handle_api_key_rotation(
-                        api_key_id,
-                        provider_key,
-                        error_message,
-                        job_id=job_id or f"workflow-{model}"
-                    )
-                    
+
+                    if use_roundrobin:
+                        print(f"[EndpointManager] Provider '{provider_key}' uses roundrobin (no key deletion)")
+                        rotation_success, next_key = handle_roundrobin_rotation(
+                            provider_key,
+                            error_message,
+                            job_id=job_id or f"workflow-{model}",
+                            current_api_key_id=api_key_id
+                        )
+                    else:
+                        rotation_success, next_key = handle_api_key_rotation(
+                            api_key_id,
+                            provider_key,
+                            error_message,
+                            job_id=job_id or f"workflow-{model}"
+                        )
+
                     if rotation_success and next_key:
-                        print(f"[EndpointManager] Rotation successful, retrying with new key...")
+                        print(f"[EndpointManager] Rotation successful, retrying with key #{next_key.get('key_number')}...")
+                        _next_api_key_data = next_key  # use directly, don't re-fetch
                         continue
                     else:
                         print(f"[EndpointManager] Rotation failed or no keys available")

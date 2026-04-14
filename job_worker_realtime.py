@@ -1110,7 +1110,8 @@ def process_video_job(job):
         if job.get("_rotated_api_key"):
             provider_api_key = job.pop("_rotated_api_key")
             api_key_id = job.pop("_rotated_api_key_id", None)
-            print(f"[ROTATION] Using pre-rotated API key (id={api_key_id}) for provider: {provider_key}")
+            api_key_number = job.pop("_rotated_api_key_number", None)
+            print(f"[ROTATION] Using pre-rotated API key (id={api_key_id}, key_number={api_key_number}) for provider: {provider_key}")
         else:
             api_key_data = get_api_key_for_job(job_model, provider_key, job_type="video")
 
@@ -1118,10 +1119,11 @@ def process_video_job(job):
 
             if api_key_data:
                 api_key_id = api_key_data.get("id")
+                api_key_number = api_key_data.get("key_number")
                 provider_api_key = api_key_data.get("api_key")
                 if api_key_data.get("provider_key"):
                     provider_key = api_key_data.get("provider_key")
-                print(f"Using API key from provider: {provider_key}")
+                print(f"Using API key from provider: {provider_key} (key #{api_key_number})")
             else:
                 print(f"No API key found for provider: {provider_key}, marking job as pending")
                 notify_error(
@@ -1265,9 +1267,14 @@ def process_video_job(job):
         if _video_completed:
             print(f"Video job {job_id} completed successfully!")
             worker_status["jobs_processed"] += 1
-            
+
             if api_key_id:
                 increment_usage_count(api_key_id)
+
+            # Clear cooldown/error status for NO_DELETE provider keys after successful use
+            if api_key_number is not None and provider_key:
+                from provider_api_keys import clear_api_key_status
+                clear_api_key_status(provider_key, int(api_key_number))
             
             # Increment quota after successful completion
             from model_quota_manager import get_quota_manager
@@ -1400,6 +1407,7 @@ def process_video_job(job):
                     job["_rr_rotation_count"] = rr_count + 1
                     job["_rotated_api_key"] = next_key.get("api_key")
                     job["_rotated_api_key_id"] = next_key.get("id")
+                    job["_rotated_api_key_number"] = next_key.get("key_number")
                     print(f"[RR-ROTATION] Retrying video job with key #{next_key.get('key_number')} (attempt {rr_count + 1}/{max_attempts})...")
                     return process_video_job(job)
                 else:
@@ -1487,7 +1495,8 @@ def process_image_job(job):
         if job.get("_rotated_api_key"):
             provider_api_key = job.pop("_rotated_api_key")
             api_key_id = job.pop("_rotated_api_key_id", None)
-            print(f"[ROTATION] Using pre-rotated API key (id={api_key_id}) for provider: {provider_key}")
+            api_key_number = job.pop("_rotated_api_key_number", None)
+            print(f"[ROTATION] Using pre-rotated API key (id={api_key_id}, key_number={api_key_number}) for provider: {provider_key}")
         else:
             api_key_data = get_api_key_for_job(model_name, provider_key, job_type="image")
 
@@ -1495,10 +1504,11 @@ def process_image_job(job):
 
             if api_key_data:
                 api_key_id = api_key_data.get("id")
+                api_key_number = api_key_data.get("key_number")
                 provider_api_key = api_key_data.get("api_key")
                 if api_key_data.get("provider_key"):
                     provider_key = api_key_data.get("provider_key")
-                print(f"Using API key from provider: {provider_key}")
+                print(f"Using API key from provider: {provider_key} (key #{api_key_number})")
             else:
                 print(f"No API key found for provider: {provider_key}, marking job as pending")
                 notify_error(
@@ -1675,6 +1685,11 @@ def process_image_job(job):
             worker_status["jobs_processed"] += 1
             if api_key_id:
                 increment_usage_count(api_key_id)
+
+            # Clear cooldown/error status for NO_DELETE provider keys after successful use
+            if api_key_number is not None and provider_key:
+                from provider_api_keys import clear_api_key_status
+                clear_api_key_status(provider_key, int(api_key_number))
             
             # Increment quota after successful completion
             from model_quota_manager import get_quota_manager
@@ -1837,6 +1852,7 @@ def process_image_job(job):
                     job["_rr_rotation_count"] = rr_count + 1
                     job["_rotated_api_key"] = next_key.get("api_key")
                     job["_rotated_api_key_id"] = next_key.get("id")
+                    job["_rotated_api_key_number"] = next_key.get("key_number")
                     print(f"[RR-ROTATION] Retrying image job with key #{next_key.get('key_number')} (attempt {rr_count + 1}/{max_attempts})...")
                     return process_image_job(job)
                 else:
