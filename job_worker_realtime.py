@@ -2966,6 +2966,42 @@ def worker_startup_tasks():
         traceback.print_exc()
 
 
+def outbound_heartbeat_worker():
+    """
+    Ping the main web service's /health endpoint every 60 seconds.
+
+    This serves two purposes:
+    1. Creates outbound network activity that prevents Render from spinning down the worker
+    2. Allows the web service to track worker liveness (if it logs the heartbeat)
+
+    Requires BACKEND_URL or WORKER_BACKEND_URL env var to be set in Render.
+    """
+    backend_url = os.getenv("BACKEND_URL") or os.getenv("WORKER_BACKEND_URL")
+    if not backend_url:
+        print("[HEARTBEAT] BACKEND_URL not set — skipping outbound heartbeat")
+        return
+
+    # Remove trailing slash if present
+    backend_url = backend_url.rstrip("/")
+
+    print(f"[HEARTBEAT] Starting outbound heartbeat to {backend_url}/health")
+    sys.stdout.flush()
+
+    while True:
+        try:
+            resp = requests.get(
+                f"{backend_url}/health",
+                timeout=10,
+                headers={"User-Agent": "atool-worker-heartbeat/1.0"}
+            )
+            print(f"[HEARTBEAT] {datetime.now().strftime('%H:%M:%S')} -> {resp.status_code}")
+            sys.stdout.flush()
+        except requests.exceptions.RequestException as e:
+            print(f"[HEARTBEAT] Failed: {e}")
+            sys.stdout.flush()
+        time.sleep(60)
+
+
 def start_realtime():
     if not SUPABASE_URL or not SUPABASE_KEY:
         print("Missing Supabase credentials!")
@@ -2985,7 +3021,12 @@ def start_realtime():
     startup_thread = threading.Thread(target=worker_startup_tasks, daemon=True, name="StartupTasks")
     startup_thread.start()
     print("[STARTUP] Background tasks thread started (non-blocking)")
-    
+
+    # Start outbound heartbeat thread (keeps Render service warm)
+    hb_thread = threading.Thread(target=outbound_heartbeat_worker, daemon=True, name="OutboundHeartbeat")
+    hb_thread.start()
+    print("[HEARTBEAT] Outbound heartbeat thread started")
+
     print("\nWorker heartbeat every 30 seconds...")
     print("   Press Ctrl+C to stop")
     print()
@@ -3017,20 +3058,26 @@ def start_realtime():
         sys.exit(0)
 
 if __name__ == "__main__":
-    # Use PORT from environment (Koyeb) or default to 5000
+    # Use PORT from environment (Render/Koyeb) or default to 5000
     port = int(os.getenv("PORT", 5000))
-    
+
     # Start job worker in background thread
     worker_thread = threading.Thread(target=start_realtime, daemon=True, name="JobWorker")
     worker_thread.start()
     print("[FLASK] Worker thread started in background")
-    
-    # Start Flask HTTP server for health checks (foreground - Koyeb requirement)
+
+    # Wait briefly for worker threads to initialize before accepting health checks
+    # This prevents Render from hitting /health before the worker is ready
+    print("[FLASK] Waiting 3 seconds for worker initialization...")
+    time.sleep(3)
+
+    # Start Flask HTTP server for health checks (foreground - Render requirement)
     print("\n" + "="*60)
     print(f"🚀 STARTING FLASK HEALTH CHECK SERVER ON PORT {port}")
     print("="*60)
     print(f"Health endpoint: http://0.0.0.0:{port}/health")
     print("="*60 + "\n")
-    
-    # Flask runs in main thread - keeps process alive and responds to Koyeb health checks
+    sys.stdout.flush()
+
+    # Flask runs in main thread - keeps process alive and responds to Render health checks
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
