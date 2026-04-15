@@ -1,5 +1,5 @@
 """
-Error Notification System via ntfy
+Error Notification System via ntfy and Telegram
 Sends instant mobile alerts for critical system errors
 """
 
@@ -9,12 +9,18 @@ from datetime import datetime
 from collections import defaultdict
 from enum import Enum
 
+# Ntfy configuration
 NTFY_SERVER = os.getenv("NTFY_SERVER", "https://ntfy.sh")
 NTFY_CRITICAL = os.getenv("NTFY_CRITICAL", "atool-critical-xyz5656")
 NTFY_API_KEYS = os.getenv("NTFY_API_KEYS", "atool-api-keys-5757")
 NTFY_PROVIDERS = os.getenv("NTFY_PROVIDERS", "atool-providers-5858")
 NTFY_STORAGE = os.getenv("NTFY_STORAGE", "atool-storage-5959")
 NTFY_WORKER = os.getenv("NTFY_WORKER", "atool-worker-6060")
+
+# Telegram configuration
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage" if TELEGRAM_BOT_TOKEN else ""
 
 error_occurrences = defaultdict(list)
 
@@ -129,15 +135,66 @@ def should_notify(error_type: str, window_minutes: int = 15) -> bool:
     return True
 
 
+def send_telegram_notification(message: str, priority: str = "urgent"):
+    """
+    Send notification to Telegram channel
+    
+    Args:
+        message: Notification message (supports Markdown formatting)
+        priority: Priority level (urgent, high, default, low)
+    """
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("[TELEGRAM] Skipping notification - bot token or chat ID not configured")
+        return False
+    
+    # Map priority to emoji
+    priority_emoji = {
+        "urgent": "🚨",
+        "high": "⚠️",
+        "default": "📢",
+        "low": "ℹ️"
+    }
+    
+    emoji = priority_emoji.get(priority, "📢")
+    
+    try:
+        # Format message for Telegram (escape special Markdown characters)
+        formatted_message = message.replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace(']', '\\]')
+        
+        response = requests.post(
+            TELEGRAM_API_URL,
+            json={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": f"{emoji} {formatted_message}",
+                "parse_mode": "MarkdownV2",
+                "disable_web_page_preview": True
+            },
+            timeout=5
+        )
+        
+        if response.status_code == 200:
+            print(f"[TELEGRAM] Notification sent successfully")
+            return True
+        else:
+            print(f"[TELEGRAM] Failed to send notification: {response.status_code} - {response.text[:200]}")
+            return False
+    except requests.exceptions.Timeout:
+        print(f"[TELEGRAM] Notification timeout")
+        return False
+    except Exception as e:
+        print(f"[TELEGRAM] Notification error: {e}")
+        return False
+
+
 def notify_error(error_type: ErrorType, message: str, context: dict = None):
     """
-    Send instant error notification via ntfy
-    
+    Send instant error notification via ntfy and Telegram
+
     Args:
         error_type: ErrorType enum
         message: Human-readable error message
         context: Optional dict with job_id, provider_key, error details, etc.
-    
+
     Example:
         notify_error(
             ErrorType.NO_API_KEY_FOR_PROVIDER,
@@ -147,23 +204,24 @@ def notify_error(error_type: ErrorType, message: str, context: dict = None):
     """
     category, tags = error_type.value
     topic = get_topic_for_category(category)
-    
+
     if not should_notify(error_type.name):
         print(f"[NOTIFY] Skipping duplicate notification for {error_type.name} (rate limited)")
         return
-    
+
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     full_message = f"🚨 {message}\n\n"
-    
+
     if context:
         full_message += "📋 Details:\n"
         for key, value in context.items():
             if value is not None:
                 value_str = str(value)[:200]
                 full_message += f"• {key}: {value_str}\n"
-    
+
     full_message += f"\n⏰ {timestamp}"
-    
+
+    # Send to ntfy
     try:
         response = requests.post(
             f"{NTFY_SERVER}/{topic}",
@@ -175,7 +233,7 @@ def notify_error(error_type: ErrorType, message: str, context: dict = None):
             },
             timeout=5
         )
-        
+
         if response.status_code == 200:
             print(f"[NOTIFY] Alert sent: {error_type.name} -> {topic}")
         else:
@@ -184,12 +242,16 @@ def notify_error(error_type: ErrorType, message: str, context: dict = None):
         print(f"[NOTIFY] Notification timeout for {error_type.name}")
     except Exception as e:
         print(f"[NOTIFY] Notification error: {e}")
+    
+    # Send to Telegram
+    send_telegram_notification(full_message, priority="urgent")
 
 
 def notify_test():
     """Send test notification to verify setup"""
     test_message = "🧪 Test notification - system is working!"
-    
+
+    # Send to ntfy
     try:
         response = requests.post(
             f"{NTFY_SERVER}/{NTFY_WORKER}",
@@ -201,13 +263,15 @@ def notify_test():
             },
             timeout=5
         )
-        
+
         if response.status_code == 200:
             print("[NOTIFY] Test notification sent successfully")
-            return True
         else:
             print(f"[NOTIFY] Test failed: {response.status_code}")
-            return False
     except Exception as e:
         print(f"[NOTIFY] Test error: {e}")
-        return False
+    
+    # Send to Telegram
+    telegram_result = send_telegram_notification(test_message, priority="default")
+    
+    return telegram_result

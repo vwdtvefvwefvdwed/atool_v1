@@ -8,6 +8,9 @@ supabase>=2.10.0
 postgrest>=0.16.0
 realtime>=2.0.0
 
+# PostgreSQL async driver for LISTEN/NOTIFY (stable alternative to Realtime WebSocket)
+asyncpg>=0.29.0
+
 # Authentication & Security
 PyJWT==2.8.0
 bcrypt==4.1.2

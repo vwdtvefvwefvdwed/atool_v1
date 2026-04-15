@@ -1,7 +1,7 @@
 """
 Modal Deployment Monitor - Realtime Watching for Fresh URLs
 Monitors modal_deployments table when no active URLs are available
-Sends ntfy notifications to developers when waiting for new deployments
+Sends ntfy and Telegram notifications to developers when waiting for new deployments
 """
 
 import os
@@ -11,6 +11,7 @@ import requests
 from datetime import datetime
 from typing import Optional, Callable
 from supabase_client import supabase
+from error_notifier import send_telegram_notification
 
 # Singleton instance
 _monitor_instance = None
@@ -38,13 +39,17 @@ class ModalDeploymentMonitor:
     
     def send_ntfy_notification(self, title: str, message: str, priority: str = "default"):
         """
-        Send notification to developer via ntfy.sh
-        
+        Send notification to developer via ntfy.sh and Telegram
+
         Args:
             title: Notification title
             message: Notification message
             priority: Notification priority (min, low, default, high, urgent)
         """
+        # Format full message for both platforms
+        full_message = f"{title}\n\n{message}"
+        
+        # Send to ntfy
         try:
             response = requests.post(
                 self.ntfy_url,
@@ -56,16 +61,16 @@ class ModalDeploymentMonitor:
                 },
                 timeout=5
             )
-            
+
             if response.status_code == 200:
                 print(f"[ntfy] ✅ Notification sent: {title}")
-                return True
             else:
                 print(f"[ntfy] ⚠️ Failed to send notification: {response.status_code}")
-                return False
         except Exception as e:
             print(f"[ntfy] ❌ Error sending notification: {e}")
-            return False
+        
+        # Send to Telegram
+        send_telegram_notification(full_message, priority=priority)
     
     def start_monitoring(self, on_new_deployment: Optional[Callable] = None):
         """

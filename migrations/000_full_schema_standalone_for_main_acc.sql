@@ -168,6 +168,41 @@ CREATE TRIGGER trigger_jobs_updated_at
 ALTER TABLE jobs REPLICA IDENTITY FULL;
 
 -- =====================================================
+-- LISTEN/NOTIFY Trigger for Job Worker (more stable than Realtime WebSocket on Render)
+-- =====================================================
+-- This trigger fires on INSERT into jobs when status='pending'.
+-- It sends a NOTIFY to the 'job_events' channel which the worker's asyncpg
+-- connection receives instantly via raw TCP (no WebSocket, no load balancer issues).
+-- =====================================================
+
+CREATE OR REPLACE FUNCTION notify_job_insert()
+RETURNS TRIGGER AS $$
+BEGIN
+  PERFORM pg_notify(
+    'job_events',
+    json_build_object(
+      'job_id',     NEW.job_id,
+      'status',     NEW.status,
+      'job_type',   NEW.job_type,
+      'model',      NEW.model,
+      'user_id',    NEW.user_id,
+      'prompt',     NEW.prompt
+    )::text
+  );
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER job_insert_notify
+  AFTER INSERT ON jobs
+  FOR EACH ROW
+  WHEN (NEW.status = 'pending')
+  EXECUTE FUNCTION notify_job_insert();
+
+COMMENT ON FUNCTION notify_job_insert IS 'Trigger function that sends job notifications to worker via PostgreSQL LISTEN/NOTIFY (more stable than Realtime WebSocket on Render)';
+COMMENT ON TRIGGER job_insert_notify ON jobs IS 'Fires on INSERT when status=pending to notify worker of new jobs';
+
+-- =====================================================
 -- Table: workflow_executions
 -- Purpose: Store workflow execution state and checkpoints for resume capability
 -- =====================================================

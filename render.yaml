@@ -57,4 +57,7 @@ services:
       # Backend URL (will be set after web service deploys)
       - key: BACKEND_URL
         sync: false  # Format: https://atool-backend.onrender.com
+      # PostgreSQL connection for LISTEN/NOTIFY (more stable than Realtime WebSocket)
+      - key: DATABASE_URL
+        sync: false  # Get from: Supabase Dashboard -> Settings -> Database -> Connection string (Session mode, port 5432). NOT 6543!
     autoDeploy: true
