@@ -5,6 +5,9 @@ Handles creation, tracking, and updates of image generation jobs
 
 import os
 import uuid
+import time
+import threading
+import requests
 from datetime import datetime
 from typing import Optional, List, Dict
 from supabase_client import supabase
@@ -19,6 +22,120 @@ USE_BATCH_JOB_CREATION = os.getenv("USE_BATCH_JOB_CREATION", "true").lower() == 
 
 # ✅ EDGE FUNCTION: Route queue operations through edge function to worker projects
 USE_EDGE_FUNCTION = os.getenv("USE_EDGE_FUNCTION", "false").lower() == "true"
+
+# Worker URL for HTTP push notifications (replaces LISTEN/NOTIFY)
+WORKER_URL = os.getenv("WORKER_URL")
+
+# Retry configuration for worker notification
+WORKER_NOTIFY_RETRIES = 3
+WORKER_NOTIFY_INITIAL_DELAY = 20  # seconds
+WORKER_NOTIFY_TIMEOUT = 5  # seconds per request
+
+
+def _notify_worker_with_retry(job_id: str, job_type: str, attempt: int = 1):
+    """
+    Internal function to send HTTP notification to worker with retry logic.
+    Runs in background thread to not block user response.
+    
+    Retry schedule:
+    - Attempt 1: immediate
+    - Attempt 2: after 20 seconds
+    - Attempt 3: after 40 seconds
+    - If all fail: job stays pending (periodic retry will catch it)
+    """
+    if job_type == "workflow":
+        print(f"[WORKER_NOTIFY] Job {job_id} is a workflow - not sending to worker (handled by app.py)")
+        return
+    
+    if not WORKER_URL:
+        print(f"[WORKER_NOTIFY] WORKER_URL not set - job {job_id} will be picked up by periodic retry")
+        return
+    
+    worker_endpoint = f"{WORKER_URL.rstrip('/')}/worker/process-job"
+    
+    try:
+        print(f"[WORKER_NOTIFY] Attempt {attempt}/{WORKER_NOTIFY_RETRIES} - Sending job {job_id} to worker")
+        
+        response = requests.post(
+            worker_endpoint,
+            json={"job_id": job_id},
+            timeout=WORKER_NOTIFY_TIMEOUT,
+            headers={"Content-Type": "application/json"}
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            print(f"[WORKER_NOTIFY] ✅ Job {job_id} accepted by worker (attempt {attempt}): {data.get('status')}")
+            return
+        
+        # Non-200 response - check if we should retry
+        print(f"[WORKER_NOTIFY] ⚠️ Worker returned {response.status_code}: {response.text[:100]}")
+        
+        if attempt < WORKER_NOTIFY_RETRIES:
+            delay = WORKER_NOTIFY_INITIAL_DELAY * attempt
+            print(f"[WORKER_NOTIFY] Retrying in {delay}s... (attempt {attempt + 1}/{WORKER_NOTIFY_RETRIES})")
+            time.sleep(delay)
+            _notify_worker_with_retry(job_id, job_type, attempt + 1)
+        else:
+            print(f"[WORKER_NOTIFY] ❌ All {WORKER_NOTIFY_RETRIES} attempts failed for job {job_id}")
+            print(f"[WORKER_NOTIFY] Job stays pending - will be caught by periodic retry (every 10 min)")
+    
+    except requests.exceptions.Timeout:
+        print(f"[WORKER_NOTIFY] ⚠️ Timeout on attempt {attempt} for job {job_id} ({WORKER_NOTIFY_TIMEOUT}s limit)")
+        
+        if attempt < WORKER_NOTIFY_RETRIES:
+            delay = WORKER_NOTIFY_INITIAL_DELAY * attempt
+            print(f"[WORKER_NOTIFY] Retrying in {delay}s... (attempt {attempt + 1}/{WORKER_NOTIFY_RETRIES})")
+            time.sleep(delay)
+            _notify_worker_with_retry(job_id, job_type, attempt + 1)
+        else:
+            print(f"[WORKER_NOTIFY] ❌ All {WORKER_NOTIFY_RETRIES} attempts timed out for job {job_id}")
+            print(f"[WORKER_NOTIFY] Job stays pending - will be caught by periodic retry (every 10 min)")
+    
+    except requests.exceptions.RequestException as e:
+        print(f"[WORKER_NOTIFY] ⚠️ Connection error on attempt {attempt} for job {job_id}: {e}")
+        
+        if attempt < WORKER_NOTIFY_RETRIES:
+            delay = WORKER_NOTIFY_INITIAL_DELAY * attempt
+            print(f"[WORKER_NOTIFY] Retrying in {delay}s... (attempt {attempt + 1}/{WORKER_NOTIFY_RETRIES})")
+            time.sleep(delay)
+            _notify_worker_with_retry(job_id, job_type, attempt + 1)
+        else:
+            print(f"[WORKER_NOTIFY] ❌ All {WORKER_NOTIFY_RETRIES} connection attempts failed for job {job_id}")
+            print(f"[WORKER_NOTIFY] Job stays pending - will be caught by periodic retry (every 10 min)")
+
+
+def notify_worker(job_id: str, job_type: str = "image"):
+    """
+    Send HTTP notification to worker to process job.
+    Replaces LISTEN/NOTIFY mechanism - direct HTTP push from app.py to worker.
+    
+    Runs in a background thread with retry logic:
+    - Attempt 1: immediate
+    - Attempt 2: after 20 seconds
+    - Attempt 3: after 40 seconds
+    - If all fail: job stays pending (periodic retry will catch it)
+    
+    Args:
+        job_id: UUID of the job to process
+        job_type: Type of job (image, video, workflow)
+    """
+    if job_type == "workflow":
+        print(f"[WORKER_NOTIFY] Job {job_id} is a workflow - not sending to worker (handled by app.py)")
+        return
+    
+    if not WORKER_URL:
+        print(f"[WORKER_NOTIFY] WORKER_URL not set - job {job_id} will be picked up by periodic retry")
+        return
+    
+    retry_thread = threading.Thread(
+        target=_notify_worker_with_retry,
+        args=(job_id, job_type, 1),
+        daemon=True,
+        name=f"WorkerNotify-{job_id[:8]}"
+    )
+    retry_thread.start()
+    print(f"[WORKER_NOTIFY] Started background notification thread for job {job_id}")
 
 
 def create_job(user_id: str, prompt: str, model: str = "flux-dev", 
@@ -65,6 +182,9 @@ def create_job(user_id: str, prompt: str, model: str = "flux-dev",
                     result = batch_response.data
                     if result.get('success'):
                         print(f"✅ Batch job creation successful: {result['job']['id']}")
+                        job_id = result['job'].get('job_id') or result['job'].get('id')
+                        if job_id:
+                            notify_worker(job_id, job_type)
                         return {
                             "success": True,
                             "job": result['job'],
@@ -263,6 +383,9 @@ def create_job(user_id: str, prompt: str, model: str = "flux-dev",
             print(f"✅ Job created: {job_id} for user {user_id} (credit deducted)")
         else:
             print(f"✅ Job created: {job_id} for user {user_id} (UNLIMITED MODE - no credit deducted)")
+        
+        # Notify worker to process job (HTTP push, replaces LISTEN/NOTIFY)
+        notify_worker(job_id, job_type)
         
         return {
             "success": True,

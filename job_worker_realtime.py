@@ -13,7 +13,7 @@ import requests
 import logging
 from datetime import datetime
 from typing import Optional
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from dotenv_vault import load_dotenv
 from postgrest.exceptions import APIError
 from multi_endpoint_manager import generate, get_endpoint_type
@@ -59,12 +59,6 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_ANON_KEY")
 VERIFY_SSL = os.getenv("VERIFY_SSL", "False").lower() == "true"
 
-# PostgreSQL connection for LISTEN/NOTIFY (more stable than Realtime WebSocket on Render)
-# Format: postgresql://postgres.[REF].[REF]:[PASSWORD]@db.[REF].supabase.co:5432/postgres?sslmode=require
-# IMPORTANT: Must use port 5432 (Session mode), NOT 6543 (Transaction mode)
-# pgbouncer in transaction mode (6543) does NOT support LISTEN/NOTIFY
-DATABASE_URL = os.getenv("DATABASE_URL")
-
 # Health check endpoint for Koyeb
 @app.route("/health", methods=["GET"])
 def health():
@@ -88,6 +82,104 @@ def index():
         "status": "running",
         "health_check": "/health"
     }), 200
+
+
+@app.route("/worker/process-job", methods=["POST"])
+def worker_process_job():
+    """
+    HTTP endpoint for direct job processing from app.py.
+    Replaces LISTEN/NOTIFY mechanism - app.py sends job directly via HTTP.
+    
+    Returns:
+        - 200: Job accepted and queued for processing
+        - 400: Invalid request (missing job_id, wrong status, workflow job)
+        - 404: Job not found
+        - 409: Job already being processed (duplicate)
+    """
+    try:
+        data = request.get_json() if request.is_json else {}
+        job_id = data.get("job_id")
+        
+        if not job_id:
+            return jsonify({"success": False, "error": "job_id required"}), 400
+        
+        print(f"\n{'='*60}")
+        print(f"HTTP PUSH: Job received from app.py")
+        print(f"{'='*60}")
+        print(f"Job ID: {job_id}")
+        print(f"{'='*60}\n")
+        sys.stdout.flush()
+        
+        from supabase_client import supabase
+        
+        job_resp = supabase.table("jobs").select("*").eq("job_id", job_id).single().execute()
+        
+        if not job_resp.data:
+            print(f"[HTTP PUSH] Job {job_id} not found in database")
+            return jsonify({"success": False, "error": "Job not found"}), 404
+        
+        job = job_resp.data
+        job_status = job.get("status")
+        job_type = job.get("job_type", "image")
+        
+        if job_status != "pending":
+            print(f"[HTTP PUSH] Job {job_id} status is '{job_status}', not 'pending' - skipping")
+            return jsonify({
+                "success": False, 
+                "error": f"Job status is '{job_status}', expected 'pending'",
+                "status": job_status
+            }), 400
+        
+        if job_type == "workflow":
+            print(f"[HTTP PUSH] Job {job_id} is a workflow - workflows are handled by app.py")
+            return jsonify({
+                "success": False, 
+                "error": "Workflow jobs are handled by app.py, not worker"
+            }), 400
+        
+        print(f"[HTTP PUSH] Processing job {job_id} (type={job_type}, model={job.get('model')})")
+        sys.stdout.flush()
+        
+        def process_in_thread():
+            try:
+                process_job_with_concurrency_control(job)
+                print(f"\n{'='*60}")
+                print(f"HTTP PUSH JOB COMPLETED: {job_id}")
+                print(f"{'='*60}\n")
+                sys.stdout.flush()
+            except Exception as thread_err:
+                print(f"\n{'='*60}")
+                print(f"ERROR PROCESSING HTTP PUSH JOB")
+                print(f"{'='*60}")
+                print(f"Error: {thread_err}")
+                import traceback
+                traceback.print_exc()
+                print(f"{'='*60}\n")
+                sys.stdout.flush()
+                
+                metadata = job.get("metadata", {}) or {}
+                provider_key = metadata.get("provider_key") or job.get("provider_key")
+                reset_job_to_pending(job_id, provider_key, f"Thread error: {str(thread_err)}")
+        
+        job_thread = threading.Thread(target=process_in_thread, daemon=True)
+        job_thread.start()
+        
+        print(f"[HTTP PUSH] Job {job_id} queued for processing")
+        sys.stdout.flush()
+        
+        return jsonify({
+            "success": True, 
+            "job_id": job_id, 
+            "status": "queued",
+            "message": "Job accepted and queued for processing"
+        }), 200
+        
+    except Exception as e:
+        print(f"[HTTP PUSH] Error processing job: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"success": False, "error": str(e)}), 500
+
 
 print("=" * 60)
 print("JOB WORKER STARTING (MULTI-ENDPOINT MODE)")
@@ -693,6 +785,9 @@ def retry_transient_errors():
     Retry pending AND pending_retry jobs that failed with transient errors (Cloudinary, network, timeout).
     Called periodically by the worker main loop every 10 minutes.
 
+    Also picks up STALE pending jobs that have no error message but were created >2 minutes ago.
+    These are jobs that never reached the worker (HTTP notification failed all retries).
+
     NOTE: API-key errors (no key, invalid key, rotation failed) are intentionally excluded.
     Those jobs must only be re-triggered when a matching key is inserted via
     api_key_realtime_listener → handle_api_key_insertion().
@@ -701,21 +796,25 @@ def retry_transient_errors():
         print("[RETRY] Checking for pending/pending_retry jobs with transient errors...")
 
         from supabase_client import supabase as _retry_sb
+        from datetime import timedelta as _td
 
-        # Query PENDING jobs (non-workflow) with error messages
+        # Cutoff for stale jobs (created >2 min ago, never touched by worker)
+        stale_cutoff = (datetime.utcnow() - _td(minutes=2)).isoformat()
+
+        # Query PENDING jobs (non-workflow) with error messages OR stale (no error, created >2 min ago)
         pending_result = _retry_sb.table("jobs") \
-            .select("job_id, model, error_message, created_at, updated_at, job_type") \
+            .select("job_id, model, error_message, created_at, updated_at, job_type, metadata") \
             .eq("status", "pending") \
             .neq("job_type", "workflow") \
             .is_("blocked_by_job_id", "null") \
-            .not_.is_("error_message", "null") \
+            .or_(f"error_message.not.is.null,created_at.lt.{stale_cutoff}") \
             .order("created_at", desc=False) \
-            .limit(50) \
+            .limit(100) \
             .execute()
         
         pending_jobs = pending_result.data if pending_result and hasattr(pending_result, 'data') else []
 
-        # Query PENDING_RETRY jobs (non-workflow) with error messages
+        # Query PENDING_RETRY jobs (non-workflow)
         pending_retry_result = _retry_sb.table("jobs") \
             .select("job_id, model, error_message, created_at, updated_at, job_type, metadata") \
             .eq("status", "pending_retry") \
@@ -730,16 +829,49 @@ def retry_transient_errors():
         jobs = pending_jobs + pending_retry_jobs
         
         if not jobs:
-            print("[RETRY] No pending/pending_retry jobs with errors found")
+            print("[RETRY] No pending/pending_retry jobs found")
             return
         
-        print(f"[RETRY] Found {len(pending_jobs)} pending + {len(pending_retry_jobs)} pending_retry jobs with errors")
-        
+        print(f"[RETRY] Found {len(pending_jobs)} pending + {len(pending_retry_jobs)} pending_retry jobs to check")
+
         retryable_count = 0
+        stale_count = 0
         for job in jobs:
             error_msg = (job.get("error_message") or "").lower()
             job_status = job.get("status", "pending")
             job_id = job.get("job_id")
+
+            # STALE jobs: No error message but created >2 min ago = never reached worker
+            if not error_msg and job_status == "pending":
+                created_at = job.get("created_at")
+                if created_at:
+                    try:
+                        created_dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                        age_minutes = (datetime.utcnow() - created_dt.replace(tzinfo=None)).total_seconds() / 60
+                        if age_minutes >= 2:
+                            print(f"[RETRY] Found STALE job {job_id} - created {age_minutes:.1f} min ago, never processed")
+                            stale_count += 1
+                            # Fetch full job and process
+                            try:
+                                full_job_result = _retry_sb.table("jobs") \
+                                    .select("*") \
+                                    .eq("job_id", job_id) \
+                                    .single() \
+                                    .execute()
+                                
+                                if full_job_result and hasattr(full_job_result, 'data') and full_job_result.data:
+                                    retry_thread = threading.Thread(
+                                        target=process_job_with_concurrency_control,
+                                        args=(full_job_result.data,),
+                                        daemon=True
+                                    )
+                                    retry_thread.start()
+                                    retryable_count += 1
+                            except Exception as api_err:
+                                print(f"[RETRY] API error fetching stale job {job_id}: {api_err}")
+                    except Exception as parse_err:
+                        print(f"[RETRY] Error parsing created_at for job {job_id}: {parse_err}")
+                continue
 
             # Skip API-key errors — these MUST only retry on key insertion, not on timer
             if _is_key_error(error_msg):
@@ -828,10 +960,13 @@ def retry_transient_errors():
                 except Exception as api_err:
                     print(f"[RETRY] API error fetching job {job_id}: {api_err}")
         
+        if stale_count > 0:
+            print(f"[RETRY] Found {stale_count} STALE jobs (never processed, created >2 min ago)")
+        
         if retryable_count > 0:
-            print(f"[RETRY] Triggered retry for {retryable_count} jobs with transient errors")
+            print(f"[RETRY] Triggered retry for {retryable_count} jobs")
         else:
-            print("[RETRY] No transient errors found to retry")
+            print("[RETRY] No jobs to retry")
             
     except Exception as e:
         print(f"[RETRY] Error during retry check: {e}")
@@ -2168,219 +2303,6 @@ def process_all_pending_workflow_jobs():
         print("="*60 + "\n")
 
 
-async def realtime_listener():
-    """
-    Listen for new jobs using PostgreSQL LISTEN/NOTIFY.
-    
-    This replaces the fragile Supabase Realtime WebSocket with a robust raw TCP
-    connection to PostgreSQL. Much more stable on Render because:
-      - No WebSocket idle timeout from load balancers
-      - No Phoenix relay server closing connections (1001 errors)
-      - Native PostgreSQL NOTIFY protocol — direct, instant, reliable
-    
-    How it works:
-      1. A database trigger on `jobs` table fires on INSERT (status='pending')
-      2. The trigger calls pg_notify('job_events', job_data)
-      3. This asyncpg connection receives the notification instantly
-      4. The notification is fed into the SAME on_new_job() callback as before
-    
-    What is NOT changed:
-      - Workflow jobs are still skipped (same job_type check)
-      - UPDATE events are still ignored (trigger only fires on INSERT)
-      - The _deferred_retry, retry_transient_errors, and coordinator paths are unchanged
-      - process_job_with_concurrency_control() is the same entry point
-      - system_flags realtime subscription remains (priority lock monitoring)
-      - provider_api_keys realtime listener remains (API key rotation)
-    """
-    import json
-    import asyncpg
-
-    try:
-        if not DATABASE_URL:
-            raise ValueError(
-                "DATABASE_URL is not set. "
-                "Get it from Supabase Dashboard -> Settings -> Database -> Connection string (Session mode, port 5432). "
-                "IMPORTANT: Use port 5432 (Session mode), NOT 6543 (Transaction mode). "
-                "pgbouncer in transaction mode does NOT support LISTEN/NOTIFY. "
-                "Format: postgresql://postgres.[REF].[REF]:[PASSWORD]@db.[REF].supabase.co:5432/postgres?sslmode=require"
-            )
-
-        print(f"[LISTEN/NOTIFY] Connecting to PostgreSQL...")
-        # statement_cache_size=0 is required for pgbouncer (Supabase port 5432)
-        # which doesn't support prepared statements in transaction pool mode.
-        conn = await asyncpg.connect(DATABASE_URL, statement_cache_size=0)
-        print(f"[LISTEN/NOTIFY] Connected successfully")
-
-        # ── Job notification handler ──────────────────────────────────────────
-        def handle_job_notification(connection, pid, channel, payload):
-            """
-            Called by asyncpg when the database sends a NOTIFY on 'job_events' channel.
-            Payload is JSON with: job_id, status, job_type, model, user_id, prompt
-            """
-            try:
-                data = json.loads(payload)
-                job_id = data.get("job_id")
-                job_type = data.get("job_type", "image")
-                status = data.get("status")
-
-                # Same workflow check as the old realtime listener — workflow jobs
-                # are ALWAYS owned by app.py (/workflows/execute).
-                if job_type == "workflow":
-                    print(
-                        f"[LISTEN/NOTIFY] Workflow job {job_id} — "
-                        f"execution owned by app.py, skipping worker dispatch"
-                    )
-                    sys.stdout.flush()
-                    return
-
-                # Build the same record format that the old realtime callback used.
-                # This is fed directly into on_new_job() which calls process_job().
-                record = {
-                    "job_id": job_id,
-                    "status": status,
-                    "job_type": job_type,
-                    "model": data.get("model"),
-                    "user_id": data.get("user_id"),
-                    "prompt": data.get("prompt"),
-                }
-
-                print(f"\n{'='*70}")
-                print(f"NEW JOB RECEIVED VIA LISTEN/NOTIFY!")
-                print(f"{'='*70}")
-                print(f"Job ID: {job_id}")
-                print(f"Type: {job_type}")
-                print(f"Prompt: {record.get('prompt', '')[:50]}...")
-                print(f"{'='*70}\n")
-                sys.stdout.flush()
-
-                def process_in_thread():
-                    try:
-                        process_job_with_concurrency_control(record)
-
-                        print(f"\n{'='*70}")
-                        print(f"LISTEN/NOTIFY JOB COMPLETED: {job_id}")
-                        print(f"{'='*70}\n")
-                        sys.stdout.flush()
-                    except Exception as thread_err:
-                        print(f"\n{'='*70}")
-                        print(f"ERROR PROCESSING JOB IN THREAD")
-                        print(f"{'='*70}")
-                        print(f"Error: {thread_err}")
-
-                        metadata = record.get("metadata", {}) or {}
-                        provider_key = metadata.get("provider_key") or record.get("provider_key")
-
-                        notify_error(
-                            ErrorType.JOB_THREAD_CRASHED,
-                            f"Job processing thread crashed for job {job_id}",
-                            context={"job_id": job_id, "provider": provider_key, "error": str(thread_err)[:200]}
-                        )
-
-                        import traceback
-                        traceback.print_exc()
-                        print(f"{'='*70}\n")
-                        sys.stdout.flush()
-
-                        reset_job_to_pending(job_id, provider_key, f"Thread error: {str(thread_err)}")
-
-                job_thread = threading.Thread(target=process_in_thread, daemon=True)
-                job_thread.start()
-                print(f"Job processing started in background thread")
-                sys.stdout.flush()
-
-            except Exception as e:
-                print(f"\n{'='*70}")
-                print(f"ERROR IN LISTEN/NOTIFY CALLBACK")
-                print(f"{'='*70}")
-                print(f"Error: {e}")
-                import traceback
-                traceback.print_exc()
-                print(f"{'='*70}\n")
-                sys.stdout.flush()
-
-        # Register the listener on the 'job_events' channel
-        await conn.add_listener('job_events', handle_job_notification)
-
-        # ── Keep system_flags realtime subscription for priority lock ───────
-        # This stays as Supabase Realtime WebSocket (separate channel, separate purpose).
-        # Priority lock changes are infrequent, so WebSocket instability here is not critical.
-        try:
-            from supabase import acreate_client
-            async_client = await acreate_client(SUPABASE_URL, SUPABASE_KEY)
-
-            def handle_flag_change(payload):
-                global _priority_lock_active
-                try:
-                    data = payload.get("data", {})
-                    record = data.get("record", payload.get("new", payload.get("record", {})))
-
-                    if not record or record.get("key") != "priority_lock":
-                        return
-
-                    new_value = record.get("value", False)
-                    old_value = _priority_lock_active
-                    _priority_lock_active = new_value
-
-                    if old_value and not new_value:
-                        print("\n" + "=" * 60)
-                        print("[PRIORITY LOCK] Lock DISABLED via remote script")
-                        print("[PRIORITY LOCK] Flushing pending P2/P3 jobs now...")
-                        print("=" * 60 + "\n")
-                        sys.stdout.flush()
-                        threading.Thread(target=process_all_pending_jobs, daemon=True, name="PriorityLockFlush").start()
-                    elif not old_value and new_value:
-                        print("\n" + "=" * 60)
-                        print("[PRIORITY LOCK] Lock ENABLED via remote script")
-                        print("[PRIORITY LOCK] Only Priority 1 jobs will be processed")
-                        print("=" * 60 + "\n")
-                        sys.stdout.flush()
-
-                except Exception as e:
-                    print(f"[PRIORITY LOCK] Error handling flag change: {e}")
-
-            flags_channel = async_client.channel("system-flags-watcher")
-            await flags_channel.on_postgres_changes(
-                event="UPDATE",
-                schema="public",
-                table="system_flags",
-                callback=handle_flag_change
-            ).subscribe()
-            print("[LISTEN/NOTIFY] Subscribed to system_flags UPDATE (priority lock via Realtime)")
-        except Exception as flag_err:
-            print(f"[LISTEN/NOTIFY] Warning: system_flags subscription failed ({flag_err})")
-            print(f"[LISTEN/NOTIFY] Priority lock will be checked at operation time instead")
-
-        # NOTE: add_listener() automatically issues the LISTEN command internally.
-        # Do NOT call conn.execute("LISTEN ...") — it conflicts with pgbouncer.
-
-        print()
-        print("=" * 60)
-        print("LISTENING FOR NEW JOBS (PostgreSQL LISTEN/NOTIFY)")
-        print("=" * 60)
-        print("Jobs are delivered via native PostgreSQL NOTIFY.")
-        print("This is more stable than Realtime WebSocket on Render.")
-        print()
-        print("NOTE: If events don't arrive, verify the trigger exists:")
-        print("   SELECT trigger_name FROM information_schema.triggers WHERE trigger_name = 'job_insert_notify';")
-        print("=" * 60)
-        print()
-        sys.stdout.flush()
-
-        # Keep the connection alive — asyncpg handles heartbeats internally
-        while True:
-            await asyncio.sleep(1)
-
-    except Exception as e:
-        print(f"Realtime listener error: {e}")
-        notify_error(
-            ErrorType.REALTIME_LISTENER_CRASHED,
-            f"LISTEN/NOTIFY listener crashed - no new jobs being processed",
-            context={"error": str(e)[:200]}
-        )
-        import traceback
-        traceback.print_exc()
-
-
 def fetch_pending_jobs_for_provider(provider_key: str) -> list:
     """
     Query ALL pending image/video jobs (not workflow) for a specific provider.
@@ -2895,17 +2817,90 @@ async def _run_with_reconnect(listener_fn, name: str):
         await asyncio.sleep(delay)
 
 
+async def priority_lock_listener():
+    """
+    Listen for priority_lock flag changes via Supabase Realtime.
+    This is kept separate from job processing (which now uses HTTP push).
+    
+    When priority_lock is enabled, only Priority 1 jobs are processed.
+    When disabled, all pending jobs are processed.
+    """
+    try:
+        from supabase import acreate_client
+        
+        if not SUPABASE_URL or not SUPABASE_KEY:
+            print("[PRIORITY LOCK] Missing Supabase credentials, skipping listener")
+            return
+        
+        async_client = await acreate_client(SUPABASE_URL, SUPABASE_KEY)
+        
+        def handle_flag_change(payload):
+            global _priority_lock_active
+            try:
+                data = payload.get("data", {})
+                record = data.get("record", payload.get("new", payload.get("record", {})))
+                
+                if not record or record.get("key") != "priority_lock":
+                    return
+                
+                new_value = record.get("value", False)
+                old_value = _priority_lock_active
+                _priority_lock_active = new_value
+                
+                if old_value and not new_value:
+                    print("\n" + "=" * 60)
+                    print("[PRIORITY LOCK] Lock DISABLED via remote script")
+                    print("[PRIORITY LOCK] Flushing pending P2/P3 jobs now...")
+                    print("=" * 60 + "\n")
+                    sys.stdout.flush()
+                    threading.Thread(target=process_all_pending_jobs, daemon=True, name="PriorityLockFlush").start()
+                elif not old_value and new_value:
+                    print("\n" + "=" * 60)
+                    print("[PRIORITY LOCK] Lock ENABLED via remote script")
+                    print("[PRIORITY LOCK] Only Priority 1 jobs will be processed")
+                    print("=" * 60 + "\n")
+                    sys.stdout.flush()
+            
+            except Exception as e:
+                print(f"[PRIORITY LOCK] Error handling flag change: {e}")
+        
+        flags_channel = async_client.channel("system-flags-watcher")
+        await flags_channel.on_postgres_changes(
+            event="UPDATE",
+            schema="public",
+            table="system_flags",
+            callback=handle_flag_change
+        ).subscribe()
+        
+        print("[PRIORITY LOCK] Subscribed to system_flags UPDATE (priority lock monitoring)")
+        print("[PRIORITY LOCK] Listener ready")
+        sys.stdout.flush()
+        
+        while True:
+            await asyncio.sleep(1)
+    
+    except Exception as e:
+        print(f"[PRIORITY LOCK] Listener error: {e}")
+        notify_error(
+            ErrorType.REALTIME_LISTENER_CRASHED,
+            f"Priority lock listener crashed",
+            context={"error": str(e)[:200]}
+        )
+        import traceback
+        traceback.print_exc()
+
+
 def run_async_listener():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
-    async def run_both_listeners():
+    async def run_listeners():
         await asyncio.gather(
-            _run_with_reconnect(realtime_listener, "RealtimeJobListener"),
-            _run_with_reconnect(api_key_realtime_listener, "ApiKeyRealtimeListener")
+            _run_with_reconnect(api_key_realtime_listener, "ApiKeyRealtimeListener"),
+            _run_with_reconnect(priority_lock_listener, "PriorityLockListener")
         )
     
-    loop.run_until_complete(run_both_listeners())
+    loop.run_until_complete(run_listeners())
 
 
 def worker_startup_tasks():
@@ -2950,9 +2945,9 @@ def worker_startup_tasks():
         print("=" * 60)
         print("JOB WORKER READY")
         print("=" * 60)
-        print("Switching to REALTIME mode (no more polling)")
-        print("Will receive instant notifications for new jobs")
-        print("Periodic retry: every 10 min for normal jobs, 5 min for workflows")
+        print("Mode: HTTP PUSH (app.py sends jobs directly)")
+        print("Endpoint: POST /worker/process-job")
+        print("Fallback: Periodic retry every 10 min for missed jobs")
         print("=" * 60)
         print()
         sys.stdout.flush()
@@ -3043,7 +3038,7 @@ def start_realtime():
             # Heartbeat every 30 seconds
             if time.time() - last_heartbeat >= 30:
                 worker_status["last_heartbeat"] = datetime.now().isoformat()
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] Worker alive, listening for jobs...")
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] Worker alive, waiting for jobs via HTTP push...")
                 sys.stdout.flush()
                 last_heartbeat = time.time()
             
