@@ -1278,6 +1278,7 @@ def jobs_stream_status(job_id):
 
     def generate():
         """Generate SSE events from shared realtime connection"""
+        consecutive_empty = 0  # Counter for DB fallback polling
         try:
             # Send initial connection event
             yield f"event: connected\ndata: {json.dumps({'type': 'connected', 'job_id': job_id})}\n\n"
@@ -1297,6 +1298,8 @@ def jobs_stream_status(job_id):
                     # Wait for update with timeout (30s keepalive)
                     payload = client_queue.get(timeout=30)
                     print(f"📥 SSE generator received payload: {type(payload)} - keys: {list(payload.keys()) if isinstance(payload, dict) else 'N/A'}")
+                    # Reset counter - realtime is working
+                    consecutive_empty = 0
 
                     # Check for error
                     if isinstance(payload, dict) and "error" in payload:
@@ -1337,6 +1340,41 @@ def jobs_stream_status(job_id):
                     # Send keepalive ping (comment only, no event name)
                     yield f": keepalive\n\n"
                     print(f"💓 Keepalive sent for job {job_id}")
+
+                    # DB FALLBACK: Poll database on first timeout if no realtime events
+                    # This handles the case where Supabase Realtime websocket is down
+                    # Check on first timeout (~30s) for immediate update when job completes
+                    consecutive_empty += 1
+                    if consecutive_empty >= 1:  # Check on first timeout (~30s)
+                        consecutive_empty = 0
+                        try:
+                            # Fetch fresh job status from DB
+                            db_response = supabase.table("jobs").select("*").eq("job_id", job_id).single().execute()
+                            if db_response.data:
+                                fresh_job = db_response.data
+                                current_status = current_job.get('status') if current_job else None
+                                fresh_status = fresh_job.get('status')
+
+                                print(f"🔍 DB fallback check: job {job_id} status={fresh_status} (was: {current_status})")
+
+                                # If status changed or reached terminal state, emit update
+                                if fresh_status != current_status:
+                                    current_job = fresh_job
+                                    event_data = {
+                                        'type': 'update',
+                                        'event': 'UPDATE',
+                                        'job': fresh_job
+                                    }
+                                    yield f"event: update\ndata: {json.dumps(event_data)}\n\n"
+                                    print(f"📤 DB fallback sent status update: {job_id} -> {fresh_status}")
+
+                                # If terminal, emit complete and close
+                                if fresh_status in ('completed', 'failed', 'cancelled'):
+                                    print(f"✅ DB fallback detected job finished: {job_id} ({fresh_status})")
+                                    yield f"event: complete\ndata: {json.dumps({'type': 'complete', 'job': fresh_job})}\n\n"
+                                    break
+                        except Exception as db_err:
+                            print(f"⚠️ DB fallback failed for job {job_id}: {db_err}")
 
         except GeneratorExit:
             print(f"🔌 Client disconnected from job {job_id} stream")
