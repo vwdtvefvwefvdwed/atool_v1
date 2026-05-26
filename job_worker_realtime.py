@@ -513,7 +513,7 @@ def reset_job_to_pending(job_id, provider_key, error_message):
                 print(f"[RESET] Job {job_id} has reached max retries ({_max_retries}) - marking as FAILED")
                 mark_job_failed(
                     job_id,
-                    f"Job failed after {_max_retries} retry attempts. Last error: {error_message}"
+                    "🔄 This model is temporarily unavailable. Please try again later or use a different model."
                 )
                 return False
             meta["pending_retry_count"] = retry_count + 1
@@ -537,7 +537,7 @@ def reset_job_to_pending(job_id, provider_key, error_message):
                     print(f"[RESET] Job {job_id} retry cap hit on fallback check — marking FAILED")
                     mark_job_failed(
                         job_id,
-                        f"Job failed after {_max_retries} retry attempts. Last error: {error_message}"
+                        "🔄 This model is temporarily unavailable. Please try again later or use a different model."
                     )
                     return False
         except Exception:
@@ -1492,7 +1492,7 @@ def process_video_job(job):
             print(f"[COMPLETION ERROR] Job completion API call failed - marking as FAILED to prevent reprocessing")
             print(f"[COMPLETION ERROR] Video was already generated but DB update failed")
             print(f"[COMPLETION ERROR] Error: {error_message}")
-            mark_job_failed(job_id, f"COMPLETION_FAILED: Video generated but status update failed - {error_message}")
+            mark_job_failed(job_id, "⚠️ Your video was generated but could not be saved. Please try again.")
             return
         
         if is_input_image_error:
@@ -1523,7 +1523,7 @@ def process_video_job(job):
             print(f"[VALIDATION ERROR] User input validation failed - NOT rotating API key")
             print(f"[VALIDATION ERROR] Error: {error_message}")
             print(f"[VALIDATION ERROR] Marking job {job_id} as FAILED (not retryable)")
-            mark_job_failed(job_id, error_message)
+            mark_job_failed(job_id, "⚠️ This model requires a specific input type that was not provided. Please check your input and try again.")
             return
         
         # All other errors (API errors, provider errors, etc.) - attempt key rotation and retry
@@ -1536,7 +1536,7 @@ def process_video_job(job):
                 print(f"[RR-ROTATION] No-delete provider '{provider_key}' | attempt {rr_count + 1} of {max_attempts} max")
                 if rr_count >= max_attempts:
                     print(f"[RR-ROTATION] Max cycles reached for '{provider_key}' - failing job")
-                    mark_job_failed(job_id, f"All API keys for {provider_key} failed after {max_attempts} rotation attempts. Please try again later.")
+                    mark_job_failed(job_id, "🔄 This model is temporarily unavailable. Please try again later or use a different model.")
                     return
                 rotation_success, next_key = handle_roundrobin_rotation(
                     provider_key, error_message, job_id, current_api_key_id=api_key_id
@@ -1553,7 +1553,7 @@ def process_video_job(job):
                     return process_video_job(job)
                 else:
                     print(f"[RR-ROTATION] No keys available for '{provider_key}' - failing job")
-                    mark_job_failed(job_id, f"No API keys available for provider: {provider_key}")
+                    mark_job_failed(job_id, "🔄 This model is temporarily unavailable. Please try again later or use a different model.")
                     return
             else:
                 print(f"[ROTATION] Attempting to rotate API key...")
@@ -1921,7 +1921,7 @@ def process_image_job(job):
             print(f"[COMPLETION ERROR] Job completion API call failed - marking as FAILED to prevent reprocessing")
             print(f"[COMPLETION ERROR] Image was already generated but DB update failed")
             print(f"[COMPLETION ERROR] Error: {error_message}")
-            mark_job_failed(job_id, f"COMPLETION_FAILED: Image generated but status update failed - {error_message}")
+            mark_job_failed(job_id, "⚠️ Your image was generated but could not be saved. Please try again.")
             return
         
         if is_input_image_error:
@@ -1952,7 +1952,7 @@ def process_image_job(job):
             print(f"[VALIDATION ERROR] User input validation failed - NOT rotating API key")
             print(f"[VALIDATION ERROR] Error: {error_message}")
             print(f"[VALIDATION ERROR] Marking job {job_id} as FAILED (not retryable)")
-            mark_job_failed(job_id, error_message)
+            mark_job_failed(job_id, "⚠️ This model requires a specific input type that was not provided. Please check your input and try again.")
             return
 
         if is_model_not_found_error and provider_key in ("vision-aicc", "cinematic-aicc"):
@@ -1976,7 +1976,7 @@ def process_image_job(job):
 
                 if rr_count >= max_attempts:
                     print(f"[RR-ROTATION] 2 full cycles completed for '{provider_key}' - failing job")
-                    mark_job_failed(job_id, f"All API keys for {provider_key} failed after 2 full rotation cycles. Please try again later.")
+                    mark_job_failed(job_id, "🔄 This model is temporarily unavailable. Please try again later or use a different model.")
                     return
 
                 rotation_success, next_key = handle_roundrobin_rotation(
@@ -1998,7 +1998,7 @@ def process_image_job(job):
                     return process_image_job(job)
                 else:
                     print(f"[RR-ROTATION] No keys available for '{provider_key}' - failing job")
-                    mark_job_failed(job_id, f"No API keys available for provider: {provider_key}")
+                    mark_job_failed(job_id, "🔄 This model is temporarily unavailable. Please try again later or use a different model.")
                     return
 
             else:

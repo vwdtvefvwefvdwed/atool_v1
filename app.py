@@ -127,6 +127,15 @@ def add_ngrok_header(response):
     response.headers['ngrok-skip-browser-warning'] = 'true'
     return response
 
+# Adaptive UI blueprint (telemetry + layout decisions). Isolated from
+# generation pipeline; safe to fail without affecting jobs.
+try:
+    from ui_events_api import ui_events_bp
+    app.register_blueprint(ui_events_bp)
+    print("[STARTUP] Adaptive UI blueprint registered at /api/ui/*")
+except Exception as _ui_err:
+    print(f"[STARTUP] Adaptive UI blueprint NOT registered: {_ui_err}")
+
 
 def _require_env(name: str) -> str:
     value = os.getenv(name)
