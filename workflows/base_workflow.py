@@ -533,17 +533,71 @@ class BaseWorkflow(ABC):
             .eq('id', execution_id)\
             .single()\
             .execute()
-        
+
         if not response.data:
             return None
-        
+
         checkpoints = response.data.get('checkpoints', {})
         checkpoint = checkpoints.get(str(step_index))
-        
+
         if checkpoint and checkpoint.get('status') == 'completed':
             return checkpoint.get('output')
-        
+
         return None
+
+    def _extract_assets_from_checkpoints(self) -> list:
+        """
+        Extract all asset URLs from workflow checkpoints.
+        Returns array of asset objects with type, url, step, step_name, key.
+
+        This enables the Reel Editor to access all intermediate workflow outputs.
+        """
+        assets = []
+
+        if not self.checkpoints:
+            return assets
+
+        for step_idx, checkpoint in self.checkpoints.items():
+            # Skip special keys
+            if step_idx == '_input' or not isinstance(step_idx, str):
+                continue
+
+            # Only process completed checkpoints
+            if checkpoint.get('status') != 'completed':
+                continue
+
+            output = checkpoint.get('output', {})
+            if not isinstance(output, dict):
+                continue
+
+            step_name = checkpoint.get('step_name', f'step_{step_idx}')
+
+            # Extract URLs from output
+            for key, value in output.items():
+                if not isinstance(value, str):
+                    continue
+
+                # Check if value is a URL
+                if 'cloudinary.com' in value or value.startswith('http'):
+                    # Determine asset type
+                    asset_type = 'image'
+                    if 'video' in key.lower() or value.endswith('.mp4') or value.endswith('.webm'):
+                        asset_type = 'video'
+                    elif 'audio' in key.lower() or value.endswith('.mp3') or value.endswith('.wav'):
+                        asset_type = 'audio'
+
+                    assets.append({
+                        'type': asset_type,
+                        'url': value,
+                        'step': int(step_idx),
+                        'step_name': step_name,
+                        'key': key
+                    })
+
+        # Sort by step index
+        assets.sort(key=lambda x: x['step'])
+
+        return assets
     
     async def _update_job_status(self, job_id: str, status: str, metadata: Dict = None):
         update_data = {'status': status}
@@ -567,14 +621,24 @@ class BaseWorkflow(ABC):
                         update_data['metadata'] = _meta
             except Exception as _meta_err:
                 logger.warning(f"[BASE_WORKFLOW] Could not clear pending_retry_count for {job_id}: {_meta_err}")
-        
+
         if metadata:
+            # ⭐ NEW: Extract assets from checkpoints for Reel Editor
+            assets = self._extract_assets_from_checkpoints()
+
+            # Add assets to metadata
+            metadata['assets'] = assets
+
+            # Log assets for debugging
+            if assets:
+                logger.info(f"[BASE_WORKFLOW] Extracted {len(assets)} assets from checkpoints for job {job_id}")
+
             update_data['workflow_metadata'] = metadata
-            
-            # Extract result fields to main job record for frontend display
+
+            # Extract result fields to main job record for frontend display (BACKWARD COMPATIBLE)
             if 'result' in metadata and isinstance(metadata['result'], dict):
                 result = metadata['result']
-                
+
                 # Video URL — any of these keys
                 video_url = (
                     result.get('video_url') or
@@ -583,7 +647,7 @@ class BaseWorkflow(ABC):
                 )
                 if video_url:
                     update_data['video_url'] = video_url
-                
+
                 # Image URL — ordered by specificity
                 image_url = (
                     result.get('edited_image_url') or
