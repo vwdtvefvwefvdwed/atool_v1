@@ -516,15 +516,19 @@ class BaseWorkflow(ABC):
             .eq('id', execution_id)\
             .single()\
             .execute()
-        
+
         checkpoints = response.data.get('checkpoints', {}) if response.data else {}
         checkpoints[str(step_index)] = checkpoint_data
-        
+
         supabase.table('workflow_executions')\
             .update({'checkpoints': checkpoints})\
             .eq('id', execution_id)\
             .execute()
-        
+
+        # Keep in-memory checkpoints in sync so asset extraction at completion
+        # sees all completed step outputs.
+        self.checkpoints = checkpoints
+
         logger.info(f"Checkpoint saved for step {step_index}: {checkpoint_data['status']}")
     
     async def _get_checkpoint_output(self, execution_id: str, step_index: int) -> Optional[Any]:
