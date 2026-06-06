@@ -1773,7 +1773,7 @@ def generate_with_infip(prompt, model, aspect_ratio, api_key, input_image_url=No
         raise Exception(f"Infip generation failed: {str(e)}")
 
 
-def generate_with_deapi(prompt, model, aspect_ratio, api_key, input_image_url=None, job_type="image", duration=5):
+def generate_with_deapi(prompt, model, aspect_ratio, api_key, input_image_url=None, job_type="image", duration=5, video_frames=None, video_fps=None):
     """
     Generate images or videos using deAPI (https://api.deapi.ai)
     Image:  https://api.deapi.ai/api/v1/client/txt2img
@@ -1819,9 +1819,17 @@ def generate_with_deapi(prompt, model, aspect_ratio, api_key, input_image_url=No
         }
         width, height = video_aspect_map.get(aspect_ratio, (768, 768))
 
-        effective_duration = max(duration, 8) if duration else 8
-        frames = min(int(effective_duration * 24), 240)
-        fps = 24
+        # Explicit frame/fps override (e.g. anime-edit wants 3s clips) takes
+        # priority. Otherwise default to the historical 8s floor for safety.
+        fps = int(video_fps) if video_fps else 24
+        if video_frames:
+            frames = min(int(video_frames), 240)
+        elif duration and duration < 8:
+            # Honor a short explicit duration instead of clamping up to 8s.
+            frames = min(int(duration * fps), 240)
+        else:
+            effective_duration = max(duration, 8) if duration else 8
+            frames = min(int(effective_duration * fps), 240)
         guidance = 7.5
         seed = -1
 
@@ -4755,7 +4763,9 @@ def generate(prompt, model, aspect_ratio, api_key, provider_key=None, input_imag
             api_key=api_key,
             input_image_url=input_image_url,
             job_type=job_type,
-            duration=duration
+            duration=duration,
+            video_frames=kwargs.get('video_frames'),
+            video_fps=kwargs.get('video_fps')
         )
     elif endpoint_type == "leonardo":
         return generate_with_leonardo(

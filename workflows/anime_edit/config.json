@@ -1,0 +1,60 @@
+{
+  "id": "anime-edit",
+  "name": "Anime Edit",
+  "description": "Turn your photo into 5 cinematic poses + 5 short motion clips, built for viral CapCut-style anime reel editing (beat-synced zooms, glow, motion blur)",
+  "icon": "🎬",
+  "category": "cinematic",
+  "preview_video": null,
+  "preview_thumbnail": null,
+  "enabled": true,
+  "default_prompts": {
+    "pose_1_hand_cover": "Use Image A as a high-fidelity facial reference for realistic identity preservation, authentic facial structure, realistic skin texture, natural eye details, and accurate facial proportions while adapting naturally into a cinematic modern streetwear pose.\n\nGenerate a photorealistic cinematic portrait optimized specifically for viral anime-style reel editing, motion blur transitions, beat-sync zoom edits, rotational edits, shake effects, and cinematic intro reveals.\n\nPOSE: standing straight, body slightly angled 20-30 degrees, one hand partially covering eyes/face, relaxed posture, subtle confident expression, visible jawline silhouette.\n\nCOMPOSITION: perfectly centered framing, medium waist-up shot, leave negative space around subject, subject occupies 45-55% frame height, optimized for zoom crops and motion blur edits.\n\nOUTFIT: oversized plain black or white t-shirt, relaxed modern streetwear fit, dark casual pants, realistic fabric folds.\n\nSCENE: cinematic urban rooftop, outdoor parking area, realistic city background, slightly blurred background depth.\n\nCAMERA: cinematic 35mm lens, slight low-angle perspective, handheld realism, shallow depth of field, HDR photography realism.\n\nLIGHTING: soft golden hour daylight, realistic outdoor shadows, believable skin reflections, cinematic exposure balance.\n\nMAINTAIN: realistic pores, natural hair strands, realistic eye reflections, authentic skin texture.\n\nSTRICTLY AVOID: anime style, cartoon look, fantasy clothing, beauty filter appearance, overprocessed AI skin, exaggerated fashion poses.\n\nOptimized for: intro reveal edits, blur openings, zoom pulse effects, motion blur transitions, CapCut-style anime edits.",
+    "pose_2_hands_behind_head": "Use Image A as a high-fidelity facial reference while preserving realistic identity, facial proportions, natural skin texture, and authentic facial structure.\n\nGenerate a cinematic photorealistic portrait specifically designed for aggressive beat-sync reel edits, glow effects, shake transitions, zoom pulses, and viral CapCut-style anime edits.\n\nPOSE: both hands behind head, elbows outward, relaxed confident posture, slight head tilt, chest slightly forward, calm cinematic expression.\n\nCOMPOSITION: centered framing, medium shot, enough crop space for zoom edits, balanced negative space around subject.\n\nOUTFIT: oversized black streetwear t-shirt, relaxed urban fashion, realistic clothing folds.\n\nSCENE: cinematic outdoor urban environment, rooftop or street location, soft blurred background.\n\nCAMERA: slight low-angle cinematic shot, handheld realism, shallow depth of field, HDR realistic photography.\n\nLIGHTING: golden hour sunlight, realistic shadows, cinematic skin highlights, believable outdoor reflections.\n\nOptimized for: beat drops, aggressive zoom edits, glow effects, shake transitions, sharpen edits, motion blur impacts.\n\nSTRICTLY AVOID: anime style, cartoon look, fantasy clothing, beauty filter appearance, overprocessed AI skin.",
+    "pose_3_side_profile": "Use Image A as a realistic facial reference while maintaining authentic identity preservation, realistic facial structure, natural skin texture, and believable outdoor lighting.\n\nGenerate a cinematic photorealistic side-profile portrait optimized specifically for cinematic glow edits, zoom transitions, motion blur reels, and anime-style CapCut edits.\n\nPOSE: body facing slightly away from camera, head turned sideways, visible side jawline, relaxed shoulders, calm confident expression.\n\nCOMPOSITION: centered cinematic framing, medium waist-up crop, enough surrounding crop space for zoom edits.\n\nOUTFIT: oversized plain streetwear t-shirt, dark casual fashion, realistic fabric folds.\n\nSCENE: outdoor cinematic urban environment, rooftop or open road, realistic blurred background depth.\n\nCAMERA: 35mm cinematic lens, slight low-angle perspective, shallow depth of field, handheld photography realism.\n\nLIGHTING: soft natural daylight, cinematic outdoor shadows, realistic skin reflections, golden-hour atmosphere.\n\nOptimized for: cinematic zoom edits, glow effects, rotational transitions, beat-sync edits, blur transitions.\n\nSTRICTLY AVOID: anime style, cartoon look, fantasy clothing, beauty filter appearance, overprocessed AI skin.",
+    "pose_4_looking_down": "Use Image A as a high-fidelity facial reference while preserving authentic identity, realistic facial anatomy, natural skin texture, and believable lighting consistency.\n\nGenerate a cinematic photorealistic portrait designed specifically for emotional beat-drop edits, slow zoom transitions, motion blur reels, and viral short-form editing workflows.\n\nPOSE: head tilted downward, eyes looking slightly down, relaxed shoulders, calm emotional posture, natural body positioning.\n\nCOMPOSITION: centered framing, medium cinematic crop, enough surrounding space for zoom-ins and blur transitions.\n\nOUTFIT: oversized minimalist streetwear t-shirt, relaxed urban outfit, realistic fabric folds.\n\nSCENE: cinematic outdoor urban location, rooftop or open road environment, realistic depth blur.\n\nCAMERA: cinematic handheld shot, slight low-angle perspective, shallow depth of field, HDR realism.\n\nLIGHTING: soft cinematic daylight, realistic shadows, subtle skin highlights, believable outdoor atmosphere.\n\nOptimized for: emotional edits, pre-drop tension, blur transitions, slow cinematic zooms, glow effects.\n\nSTRICTLY AVOID: anime style, cartoon look, fantasy clothing, beauty filter appearance, overprocessed AI skin.",
+    "pose_5_walking": "Use Image A as a high-fidelity facial reference while preserving realistic identity, natural facial structure, authentic skin texture, and believable body proportions.\n\nGenerate a cinematic photorealistic urban walking portrait specifically optimized for motion blur transitions, speed ramps, beat-sync edits, and anime-style reel workflows.\n\nPOSE: walking sideways, body turned 40-50 degrees, one shoulder slightly forward, natural walking posture, cinematic confident expression.\n\nCOMPOSITION: centered framing, medium-wide shot, enough crop space for directional motion blur and zoom effects.\n\nOUTFIT: oversized streetwear t-shirt, relaxed dark pants, realistic fabric movement, natural clothing folds.\n\nSCENE: cinematic outdoor urban road, rooftop or industrial environment, realistic blurred city atmosphere.\n\nCAMERA: cinematic handheld photography, slight low-angle perspective, 35mm lens look, shallow depth of field, HDR realism.\n\nLIGHTING: soft daylight, realistic outdoor shadows, cinematic exposure balance, believable reflections.\n\nOptimized for: speed ramps, motion blur transitions, directional shake edits, zoom impacts, beat-sync transitions.\n\nSTRICTLY AVOID: anime style, cartoon look, fantasy clothing, beauty filter appearance, overprocessed AI skin.",
+
+    "video_1_hand_cover": "Create realistic cinematic movement from the generated portrait while preserving facial identity, realistic anatomy, and authentic lighting consistency.\n\nMOTION: subtle body sway, slight hand movement near face, slow head tilt toward camera, realistic blinking, natural breathing motion, slight clothing movement from wind.\n\nCAMERA MOTION: smooth cinematic push-in, subtle handheld shake, micro rotational movement, realistic motion blur.\n\nTIMING: movement peaks every 0.5-0.8 seconds, optimized for beat-sync editing, ideal for zoom pulses and blur transitions.\n\nVISUAL STYLE: cinematic reel aesthetic, photorealistic outdoor realism, realistic HDR exposure, natural depth of field.\n\nSTRICTLY AVOID: face morphing, unstable anatomy, exaggerated motion, floating artifacts, unrealistic body movement.",
+    "video_2_hands_behind_head": "Animate the subject with realistic cinematic movement while preserving identity consistency and stable anatomy.\n\nMOTION: subtle elbow movement, slight body sway, natural head movement, realistic blinking, cinematic confident posture.\n\nCAMERA: aggressive slow push-in, micro shake impacts, subtle rotational movement, realistic motion blur.\n\nTIMING: optimized for beat-sync edits, movement impacts every 0.5 seconds, designed for speed ramps and zoom pulses.\n\nVISUAL STYLE: cinematic viral reel style, photorealistic outdoor realism, HDR exposure, handheld camera realism.\n\nSTRICTLY AVOID: AI morphing, unrealistic limb motion, face distortion, unstable body proportions.",
+    "video_3_side_profile": "Create realistic cinematic movement while preserving stable facial identity and realistic anatomy.\n\nMOTION: slow head turn, slight shoulder movement, natural blinking, subtle breathing motion, realistic clothing movement.\n\nCAMERA: smooth side push-in, slight orbital camera motion, cinematic handheld realism, realistic motion blur.\n\nTIMING: optimized for beat-sync editing, designed for smooth zoom transitions, cinematic pacing.\n\nVISUAL STYLE: photorealistic reel aesthetic, realistic HDR outdoor atmosphere, cinematic shallow depth of field.\n\nSTRICTLY AVOID: exaggerated body movement, AI face morphing, unstable anatomy, unrealistic motion artifacts.",
+    "video_4_looking_down": "Animate the portrait with realistic cinematic movement while preserving stable facial identity and natural anatomy.\n\nMOTION: slow head lift, subtle breathing motion, realistic blinking, natural body sway, slight clothing movement.\n\nCAMERA: slow cinematic zoom-in, subtle handheld shake, smooth motion blur, gentle rotational movement.\n\nTIMING: designed for pre-drop build-up, smooth cinematic pacing, optimized for beat-sync transitions.\n\nVISUAL STYLE: photorealistic cinematic reel, realistic outdoor atmosphere, HDR realism, cinematic depth.\n\nSTRICTLY AVOID: unstable face movement, exaggerated motion, unrealistic anatomy, AI morphing artifacts.",
+    "video_5_walking": "Animate the subject with realistic cinematic walking motion while preserving stable facial identity and realistic anatomy.\n\nMOTION: slow natural walking, slight body turn, realistic arm swing, subtle head movement, realistic clothing physics, natural stepping motion.\n\nCAMERA: cinematic tracking shot, subtle handheld movement, directional motion blur, smooth rotational movement.\n\nTIMING: optimized for speed-ramp edits, movement peaks every beat, ideal for transition clips.\n\nVISUAL STYLE: photorealistic cinematic reel, realistic urban motion, HDR outdoor realism, handheld cinematic energy.\n\nSTRICTLY AVOID: floating motion, unstable legs, AI morphing, unrealistic gait, body distortion."
+  },
+  "supported_models": {
+    "generate_poses": [
+      "nano-banana-ondemand"
+    ],
+    "generate_videos": [
+      "ltx2-19b-dist-fp8-deapi"
+    ]
+  },
+  "steps": [
+    {
+      "id": 0,
+      "name": "upload",
+      "type": "input",
+      "description": "Upload your face image",
+      "required_input": "image"
+    },
+    {
+      "id": 1,
+      "name": "generate_poses",
+      "type": "generation",
+      "description": "Generate 5 cinematic poses for the anime edit",
+      "model_type": "image",
+      "default_model": "nano-banana-ondemand",
+      "provider": "vision-ondemand"
+    },
+    {
+      "id": 2,
+      "name": "generate_videos",
+      "type": "generation",
+      "description": "Animate each pose into a 3-second motion clip (LTX image-to-video)",
+      "model_type": "video",
+      "default_model": "ltx2-19b-dist-fp8-deapi",
+      "provider": "cinematic-deapi"
+    }
+  ],
+  "estimated_duration_seconds": 360,
+  "credits_cost": 50
+}

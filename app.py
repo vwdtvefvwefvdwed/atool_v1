@@ -2732,7 +2732,10 @@ def execute_workflow():
         gender_version = request.form.get('gender_version')
         if gender_version and gender_version not in ('male', 'female'):
             gender_version = None
-        
+
+        # Extract optional player for multi-character workflows (e.g. FIFA Legend Mode)
+        player = request.form.get('player')
+
         workflow_manager = get_workflow_manager()
         workflow = workflow_manager.get_workflow(workflow_id)
         
@@ -2814,12 +2817,13 @@ def execute_workflow():
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
-                # Build input_data: dict when gender_version present, else raw URL for backward compat
+                # Build input_data: dict when gender_version or player present, else raw URL for backward compat
                 wf_input = input_image_url or input_file
-                if gender_version and isinstance(wf_input, str):
+                if (gender_version or player) and isinstance(wf_input, str):
                     wf_input = {
                         'image_url': input_image_url,
                         'gender_version': gender_version,
+                        'player': player,
                     }
                 loop.run_until_complete(
                     workflow_manager.execute_workflow(
