@@ -2736,6 +2736,14 @@ def execute_workflow():
         # Extract optional player for multi-character workflows (e.g. FIFA Legend Mode)
         player = request.form.get('player')
 
+        # Extract optional reference_image_url — the BASE scene for gallery-driven
+        # workflows (e.g. common-workflow / Gallery Remix). The frontend sends the
+        # clicked gallery card's image_url (sourced from the static pool.json), so
+        # the workflow edits that image without any Supabase lookup.
+        reference_image_url = request.form.get('reference_image_url')
+        if reference_image_url and not reference_image_url.startswith(('http://', 'https://')):
+            reference_image_url = None
+
         workflow_manager = get_workflow_manager()
         workflow = workflow_manager.get_workflow(workflow_id)
         
@@ -2817,13 +2825,15 @@ def execute_workflow():
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
-                # Build input_data: dict when gender_version or player present, else raw URL for backward compat
+                # Build input_data: dict when gender_version, player, or a gallery
+                # reference image is present, else raw URL for backward compat.
                 wf_input = input_image_url or input_file
-                if (gender_version or player) and isinstance(wf_input, str):
+                if (gender_version or player or reference_image_url) and isinstance(wf_input, str):
                     wf_input = {
                         'image_url': input_image_url,
                         'gender_version': gender_version,
                         'player': player,
+                        'reference_image_url': reference_image_url,
                     }
                 loop.run_until_complete(
                     workflow_manager.execute_workflow(

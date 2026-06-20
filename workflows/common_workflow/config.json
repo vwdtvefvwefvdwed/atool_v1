@@ -1,0 +1,39 @@
+{
+  "id": "common-workflow",
+  "name": "Gallery Remix",
+  "description": "Put your face into any image you picked from the gallery — AI face swap with identity preservation",
+  "icon": "🎭",
+  "category": "gallery",
+  "preview_video": null,
+  "preview_thumbnail": null,
+  "enabled": true,
+  "default_prompts": {
+    "image_edit_male": "REFERENCE IMAGE = STYLE SOURCE ONLY\n\nUSER FACE IMAGE = IDENTITY SOURCE ONLY\n\nAnalyze the reference image and extract every visual characteristic including artistic style, rendering quality, composition, camera angle, lens type, lighting, shadows, color grading, clothing, hairstyle, body proportions, accessories, environment, atmosphere, mood, textures, depth of field, cinematic effects, and overall visual aesthetics.\n\nThe reference image may or may not contain a visible face. If the reference face is hidden, masked, covered, cropped, turned away, stylized, non-human, anime, illustrated, or absent entirely, do not attempt to copy facial features from the reference image. Instead, use only the user face image as the identity source while preserving all other visual characteristics from the reference image.\n\nGenerate a realistic male subject using the user's facial identity with maximum facial accuracy and recognition. Preserve the user's eyes, nose, lips, jawline, facial proportions, skin details, age appearance, and unique identifying characteristics.\n\nRecreate the exact style, visual quality, artistic direction, outfit, pose, body language, camera framing, environment, and atmosphere of the reference image. The final image should appear as if the user was the original person photographed, illustrated, or rendered in the reference image.\n\nPriority Order:\n\n1. User identity preservation\n2. Reference image style accuracy\n3. High-end visual quality\n4. Natural realism and consistency\n\nProfessional studio quality, ultra-high detail, premium production quality, sharp focus, realistic skin texture, realistic hair strands, realistic lighting interaction, cinematic composition, seamless identity integration, perfect anatomy, no face distortion, no identity drift, no artifacts, no blur, no low-resolution details, no oversmoothing, no AI-generated defects.\n\nMasterpiece quality, production-ready, 8K quality, highly detailed, visually striking, consistent style reproduction.",
+    "image_edit_female": "REFERENCE IMAGE = STYLE SOURCE ONLY\n\nUSER FACE IMAGE = IDENTITY SOURCE ONLY\n\nAnalyze the reference image and extract every visual characteristic including artistic style, rendering quality, composition, camera angle, lens type, lighting, shadows, color grading, clothing, hairstyle, body proportions, accessories, environment, atmosphere, mood, textures, depth of field, cinematic effects, and overall visual aesthetics.\n\nThe reference image may or may not contain a visible face. If the reference face is hidden, masked, covered, cropped, turned away, stylized, non-human, anime, illustrated, or absent entirely, do not attempt to copy facial features from the reference image. Instead, use only the user face image as the identity source while preserving all other visual characteristics from the reference image.\n\nGenerate a realistic female subject using the user's facial identity with maximum facial accuracy and recognition. Preserve the user's eyes, nose, lips, facial proportions, skin details, age appearance, and unique identifying characteristics.\n\nRecreate the exact style, visual quality, artistic direction, outfit, pose, body language, camera framing, environment, and atmosphere of the reference image. The final image should appear as if the user was the original person photographed, illustrated, or rendered in the reference image.\n\nPriority Order:\n\n1. User identity preservation\n2. Reference image style accuracy\n3. High-end visual quality\n4. Natural realism and consistency\n\nProfessional studio quality, ultra-high detail, premium production quality, sharp focus, realistic skin texture, realistic hair strands, realistic lighting interaction, cinematic composition, seamless identity integration, perfect anatomy, no face distortion, no identity drift, no artifacts, no blur, no low-resolution details, no oversmoothing, no AI-generated defects.\n\nMasterpiece quality, production-ready, 8K quality, highly detailed, visually striking, consistent style reproduction."
+  },
+  "supported_models": {
+    "image_edit": [
+      "nano-banana-ondemand"
+    ]
+  },
+  "steps": [
+    {
+      "id": 0,
+      "name": "upload",
+      "type": "input",
+      "description": "Upload your face image",
+      "required_input": "image"
+    },
+    {
+      "id": 1,
+      "name": "image_edit",
+      "type": "generation",
+      "description": "AI-powered face swap onto the selected gallery image with identity preservation",
+      "model_type": "image",
+      "default_model": "nano-banana-ondemand",
+      "provider": "vision-ondemand"
+    }
+  ],
+  "estimated_duration_seconds": 30,
+  "credits_cost": 25
+}
