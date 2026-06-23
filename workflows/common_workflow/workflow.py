@@ -97,15 +97,21 @@ class CommonWorkflowWorkflow(BaseWorkflow):
         logger.info(f"Image A (user face/identity): {user_face_url}")
         logger.info(f"Prompt: {prompt[:100]}...")
 
-        # Order matches the CSK convention for the Nano Banana direct call:
-        # First URL  = base image (scene to edit) = gallery reference
-        # Second URL = face identity source       = user's uploaded face
+        # We want a BRAND-NEW image that RE-RENDERS the real user (identity, body,
+        # skin tone) into the STYLE of the gallery image — NOT a head-swap that
+        # pastes the user's face onto the gallery scene.
+        #
+        # Nano Banana EDITS the FIRST image in the array (it is the base canvas).
+        # So the user's photo MUST be first (keep the real person) and the gallery
+        # image is the SECOND/style reference (apply its look, scene, lighting).
+        # This is the opposite order from the team workflows (CSK/MI/RCB), which
+        # intentionally do a face-swap onto a fixed scene.
         generation_params = {
             'prompt': prompt,
             'model': model,
             'provider_key': provider,
-            'input_image_url': base_scene_url,        # FIRST = base scene (gallery)
-            'reference_image_url': user_face_url,     # SECOND = face identity (user)
+            'input_image_url': user_face_url,         # FIRST = base canvas (USER identity/body/skin)
+            'reference_image_url': base_scene_url,    # SECOND = style/scene reference (gallery)
             'aspect_ratio': '1:1',
             'job_id': self.job_id
         }
