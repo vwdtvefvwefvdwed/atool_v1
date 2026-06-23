@@ -497,6 +497,20 @@ def detect_error_type(error_message: str, provider: str) -> Optional[str]:
     if any(x in error_msg_lower for x in _NETWORK_INDICATORS):
         return "network_error"
 
+    # Agent/provider backend infrastructure failures must never be classified as
+    # key/credit/limit errors. These originate from the upstream agent's OWN
+    # processing/storage backend (e.g. the On-Demand edit-image2 agent's internal
+    # Cloudinary account being disabled). The failure is shared across ALL our API
+    # keys for that provider, so rotating keys cannot help and would only burn
+    # attempts and apply false cooldowns. Treat as a non-key infrastructure error.
+    _AGENT_INFRA_INDICATORS = [
+        "cloud_name is disabled",
+        "cloud_name disabled",
+        "image editing failed",
+    ]
+    if any(x in error_msg_lower for x in _AGENT_INFRA_INDICATORS):
+        return "agent_infra_error"
+
     actual_provider = PROVIDER_KEY_MAPPING.get(provider.lower(), provider.lower())
     provider_patterns = ERROR_PATTERNS.get(actual_provider, {})
     

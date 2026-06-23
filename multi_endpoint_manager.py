@@ -4964,7 +4964,7 @@ class EndpointManager:
         """
         import asyncio
         from provider_api_keys import get_api_key_for_job
-        from api_key_rotation import handle_api_key_rotation, handle_roundrobin_rotation, should_rotate_key
+        from api_key_rotation import handle_api_key_rotation, handle_roundrobin_rotation, should_rotate_key, detect_error_type
         from provider_constants import NO_DELETE_ROTATE_PROVIDERS
         
         print(f"🔍 [EndpointManager] generate_image - provider_key: {provider_key}, model: {model}")
@@ -5021,6 +5021,19 @@ class EndpointManager:
                 error_message = str(e)
                 print(f"[EndpointManager] Generation error (attempt {attempt}/{max_rotation_attempts}): {error_message}")
 
+                # Upstream agent backend failure (e.g. On-Demand edit-image2's own
+                # Cloudinary disabled: "cloud_name is disabled"). Key rotation cannot
+                # help and an image-edit job must NOT degrade to text-to-image. Retry
+                # the SAME key (no rotation, no deletion, no cooldown) up to the
+                # attempt ceiling, then mark the job as failed.
+                if detect_error_type(error_message, provider_key) == "agent_infra_error":
+                    if attempt < max_rotation_attempts:
+                        print(f"[EndpointManager] Agent backend infrastructure error — not rotating keys, retrying same key ({attempt}/{max_rotation_attempts})")
+                        _next_api_key_data = api_key_data  # reuse same key, no rotation
+                        continue
+                    print(f"[EndpointManager] Agent backend still failing after {max_rotation_attempts} attempts — marking job as failed")
+                    raise Exception(f"AGENT_INFRA_ERROR: On-Demand agent backend unavailable after {max_rotation_attempts} attempts: {error_message}")
+
                 if should_rotate_key(error_message, provider_key):
                     print(f"[EndpointManager] Error requires key rotation, attempting...")
 
@@ -5074,7 +5087,7 @@ class EndpointManager:
         """
         import asyncio
         from provider_api_keys import get_api_key_for_job
-        from api_key_rotation import handle_api_key_rotation, handle_roundrobin_rotation, should_rotate_key
+        from api_key_rotation import handle_api_key_rotation, handle_roundrobin_rotation, should_rotate_key, detect_error_type
         from provider_constants import NO_DELETE_ROTATE_PROVIDERS
 
         print(f"🔍 [EndpointManager] generate_video - provider_key: {provider_key}, model: {model}")
@@ -5134,6 +5147,19 @@ class EndpointManager:
             except Exception as e:
                 error_message = str(e)
                 print(f"[EndpointManager] Generation error (attempt {attempt}/{max_rotation_attempts}): {error_message}")
+
+                # Upstream agent backend failure (e.g. On-Demand edit-image2's own
+                # Cloudinary disabled: "cloud_name is disabled"). Key rotation cannot
+                # help and an image-edit job must NOT degrade to text-to-image. Retry
+                # the SAME key (no rotation, no deletion, no cooldown) up to the
+                # attempt ceiling, then mark the job as failed.
+                if detect_error_type(error_message, provider_key) == "agent_infra_error":
+                    if attempt < max_rotation_attempts:
+                        print(f"[EndpointManager] Agent backend infrastructure error — not rotating keys, retrying same key ({attempt}/{max_rotation_attempts})")
+                        _next_api_key_data = api_key_data  # reuse same key, no rotation
+                        continue
+                    print(f"[EndpointManager] Agent backend still failing after {max_rotation_attempts} attempts — marking job as failed")
+                    raise Exception(f"AGENT_INFRA_ERROR: On-Demand agent backend unavailable after {max_rotation_attempts} attempts: {error_message}")
 
                 if should_rotate_key(error_message, provider_key):
                     print(f"[EndpointManager] Error requires key rotation, attempting...")

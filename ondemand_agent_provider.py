@@ -282,16 +282,18 @@ def generate_with_ondemand_agent(
         # - Second URL should be face identity source
         # The prompt should reference "first image" and "second image" accordingly
         print(f"[OnDemand Agent] Image URLs: {all_urls}")
-        
+
+        # Image-edit job: the direct edit-image2 agent is the ONLY acceptable path.
+        # We must NEVER silently degrade to text-to-image via the chat orchestrator.
+        # On any failure (e.g. server-side 500 "cloud_name is disabled") let it
+        # propagate so EndpointManager retries WITHOUT key rotation and, after the
+        # attempt ceiling, marks the job as failed.
         result = _call_nano_banana_pro_direct(api_key_val, all_urls, prompt, timeout=180)
-        
         if result.get("success"):
             return {"success": True, "url": result["url"], "type": "image"}
-        else:
-            # Fallback to chat orchestrator if direct method fails
-            print(f"[OnDemand Agent] Direct method failed, falling back to chat orchestrator: {result.get('error')}")
-            # Continue to chat orchestrator below
-            all_urls = []  # Reset to force fallback
+        raise RuntimeError(
+            f"On-Demand image edit failed (no text-to-image fallback): {result.get('error')}"
+        )
     else:
         print(f"[OnDemand Agent] Using CHAT orchestrator (text-to-image or direct disabled)")
 
