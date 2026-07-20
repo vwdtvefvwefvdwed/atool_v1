@@ -78,7 +78,7 @@ class FifaWorldCupWorkflow(BaseWorkflow):
         logger.info("Starting FIFA Legend Mode image edit step")
         endpoint_manager = get_endpoint_manager()
 
-        model = step_config.get('model', step_config.get('default_model', 'nano-banana-ondemand'))
+        model = step_config.get('model', step_config.get('default_model', 'gpt-image-2-ondemand'))
         provider = step_config.get('provider', 'vision-ondemand')
 
         # Select prompt based on player + gender_version passed from upload step

@@ -8,13 +8,11 @@ import tempfile
 import re
 from pathlib import Path
 from urllib.parse import quote
-from dotenv_vault import load_dotenv
+from envvault import load_env
 import cloudinary
 import cloudinary.uploader
 import cloudinary.api
-
-load_dotenv()
-
+load_env()
 def sanitize_for_cloudinary(text):
     """
     Sanitize text for Cloudinary context field by removing emojis and problematic unicode

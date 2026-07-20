@@ -14,7 +14,7 @@ import logging
 from datetime import datetime
 from typing import Optional
 from flask import Flask, jsonify, request
-from dotenv_vault import load_dotenv
+from envvault import load_env
 from postgrest.exceptions import APIError
 from multi_endpoint_manager import generate, get_endpoint_type
 from provider_api_keys import get_api_key_for_job, increment_usage_count, get_worker1_client, map_model_to_provider, get_all_api_keys_for_provider
@@ -37,9 +37,7 @@ logging.getLogger('websockets').setLevel(logging.CRITICAL)
 logging.getLogger('websockets.protocol').setLevel(logging.CRITICAL)
 logging.getLogger('realtime').setLevel(logging.WARNING)
 logging.getLogger('root').setLevel(logging.WARNING)
-
-load_dotenv()
-
+load_env()
 # Flask app for health checks (Koyeb requirement)
 app = Flask(__name__)
 

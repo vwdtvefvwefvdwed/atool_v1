@@ -4,15 +4,13 @@ Run this script ONCE after deploying edge functions to move existing data
 """
 
 import os
-from dotenv_vault import load_dotenv
+from envvault import load_env
 from supabase_client import supabase
 from worker_client import get_worker_client
 from datetime import datetime
 
 # Load environment variables
-load_dotenv()
-
-
+load_env()
 def migrate_queue(queue_name: str, worker_client) -> dict:
     """
     Migrate a single queue table from main project to worker projects

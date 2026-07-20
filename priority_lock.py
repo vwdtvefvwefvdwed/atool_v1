@@ -16,11 +16,8 @@ Or set in .env and run:
 import os
 import sys
 import requests
-from dotenv_vault import load_dotenv
-
-load_dotenv()
-
-
+from envvault import load_env
+load_env()
 def toggle_priority_lock(enable=True):
     backend_url = os.getenv("BACKEND_URL", "http://localhost:5000")
     secret_key = os.getenv("SECRET_KEY")

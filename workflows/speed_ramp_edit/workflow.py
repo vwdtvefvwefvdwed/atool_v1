@@ -87,7 +87,7 @@ class SpeedRampEditWorkflow(BaseWorkflow):
         logger.info("Starting Speed Ramp Edit pose generation (5 poses)")
         endpoint_manager = get_endpoint_manager()
 
-        model = step_config.get('model', step_config.get('default_model', 'nano-banana-ondemand'))
+        model = step_config.get('model', step_config.get('default_model', 'gpt-image-2-ondemand'))
         provider = step_config.get('provider', 'vision-ondemand')
 
         user_face_url = input_data['image_url']

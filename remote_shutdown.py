@@ -7,10 +7,8 @@ Note: On Koyeb, the service will auto-restart if terminated. Use maintenance mod
 import os
 import sys
 import requests
-from dotenv_vault import load_dotenv
-
-load_dotenv()
-
+from envvault import load_env
+load_env()
 def toggle_maintenance(enable=True):
     backend_url = os.getenv("BACKEND_URL", "https://fiscal-darice-atoolworker-26d3b1bc.koyeb.app")
     admin_secret = os.getenv("ADMIN_SECRET")

@@ -57,7 +57,7 @@ class AngledLookbackShotWorkflow(BaseWorkflow):
         logger.info("Starting Angled Lookback Shot image edit step")
         endpoint_manager = get_endpoint_manager()
         
-        model = step_config.get('model', step_config.get('default_model', 'nano-banana-ondemand'))
+        model = step_config.get('model', step_config.get('default_model', 'gpt-image-2-ondemand'))
         provider = step_config.get('provider', 'vision-ondemand')
         prompt = self.config['default_prompts']['image_edit']
         

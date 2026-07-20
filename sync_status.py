@@ -5,11 +5,9 @@ Shows sync operations, success rate, and data transfer stats
 
 import os
 from datetime import datetime, timedelta, timezone
-from dotenv_vault import load_dotenv
+from envvault import load_env
 from supabase import create_client
-
-load_dotenv()
-
+load_env()
 # NEW account (migration target - where sync_metadata is stored)
 NEW_SUPABASE_URL = os.getenv('NEW_SUPABASE_URL')
 NEW_SUPABASE_KEY = os.getenv('NEW_SUPABASE_SERVICE_ROLE_KEY') or os.getenv('NEW_SUPABASE_ANON_KEY')

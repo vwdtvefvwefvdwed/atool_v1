@@ -10,10 +10,8 @@ import time
 import threading
 from datetime import datetime
 from collections import deque
-from dotenv_vault import load_dotenv
-
-load_dotenv()
-
+from envvault import load_env
+load_env()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 TELEGRAM_SECRET = os.getenv("TELEGRAM_SECRET")

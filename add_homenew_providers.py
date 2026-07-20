@@ -10,10 +10,8 @@ Usage:
 import os
 import sys
 from supabase import create_client, Client
-from dotenv_vault import load_dotenv
-
-load_dotenv()
-
+from envvault import load_env
+load_env()
 WORKER_1_URL = os.getenv("WORKER_1_URL")
 WORKER_1_SERVICE_KEY = os.getenv("WORKER_1_SERVICE_ROLE_KEY")
 

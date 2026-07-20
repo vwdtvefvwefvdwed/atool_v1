@@ -7,27 +7,24 @@ import os
 import re
 import requests
 from urllib.parse import quote
-from dotenv_vault import load_dotenv
+from envvault import load_env
 import cloudinary
 import cloudinary.uploader
 import cloudinary.api
 import tempfile
 from pathlib import Path
 
-# Load environment from vault (requires DOTENV_KEY env var in production)
+# Load environment from .env (locally) or system env vars (Render).
+# envvault.load_env() checks DOTENV_KEY: if set, decrypts .env.vault;
+# otherwise falls back to the plaintext .env next to this file.
 script_dir = Path(__file__).parent
-vault_path = script_dir / ".env.vault"
-dotenv_key = os.getenv("DOTENV_KEY")
-
-if vault_path.exists() and dotenv_key:
-    print(f"[CLOUDINARY MANAGER] Loading env from vault with DOTENV_KEY")
-    load_dotenv(vault_path)
-elif vault_path.exists():
-    print(f"[CLOUDINARY MANAGER] Warning: .env.vault exists but DOTENV_KEY not set, trying load anyway")
-    load_dotenv(vault_path)
+env_path = script_dir / ".env"
+if env_path.exists():
+    print(f"[CLOUDINARY MANAGER] Loading env from {env_path}")
+    load_env(fallback_dotenv=env_path)
 else:
-    print(f"[CLOUDINARY MANAGER] No .env.vault found, using system env vars")
-    load_dotenv()
+    print(f"[CLOUDINARY MANAGER] No local .env, loading from vault / system env vars")
+    load_env()
 
 def sanitize_for_cloudinary(text):
     """

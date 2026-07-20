@@ -21,7 +21,7 @@
   },
   "supported_models": {
     "image_edit": [
-      "nano-banana-ondemand"
+      "gpt-image-2-ondemand"
     ]
   },
   "steps": [
@@ -38,7 +38,7 @@
       "type": "generation",
       "description": "AI-powered FIFA legend aura poster with identity preservation",
       "model_type": "image",
-      "default_model": "nano-banana-ondemand",
+      "default_model": "gpt-image-2-ondemand",
       "provider": "vision-ondemand"
     }
   ],

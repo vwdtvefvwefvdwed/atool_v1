@@ -5,11 +5,9 @@ Run this script ONCE when setting up a new Supabase account for syncing
 
 import os
 from datetime import datetime, timezone, timedelta
-from dotenv_vault import load_dotenv
+from envvault import load_env
 from supabase import create_client
-
-load_dotenv()
-
+load_env()
 # OLD account (current production - source for sync)
 OLD_SUPABASE_URL = os.getenv('SUPABASE_URL')
 OLD_SUPABASE_KEY = os.getenv('SUPABASE_SERVICE_ROLE_KEY')

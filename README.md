@@ -35,3 +35,31 @@ This Flask backend fetches the latest ngrok URL from Discord and proxies request
 3. Frontend calls `/generate` endpoint
 4. Backend forwards request to ComfyUI via ngrok URL
 
+## Environment Secrets (envvault)
+
+Secrets are managed by the self-hosted `envvault` package (replaces the paid
+`python-dotenv-vault` / dotenv.org sync). Same one-key deployment model, no
+dotenv.org dependency.
+
+- Local plaintext secrets live in `backend/.env` (gitignored).
+- Encrypted vault `backend/.env.vault` is committed; safe to push.
+- Render stores ONE secret (`DOTENV_KEY`) which decrypts the vault at boot.
+
+### Quick workflow
+
+```powershell
+cd backend
+# edit plaintext secrets
+notepad .env
+# re-encrypt (prints the new DOTENV_KEY) - then update it on Render
+python -m envvault encrypt .env --environment production
+# commit the new vault
+git add .env.vault && git commit -m "rotate secrets" && git push
+```
+
+Full migration write-up + operator runbook:
+[`docs/architecture/ENVVAULT_MIGRATION.md`](../docs/architecture/ENVVAULT_MIGRATION.md)
+
+Workflow cheatsheet: [`envvault/README.md`](envvault/README.md)
+
+

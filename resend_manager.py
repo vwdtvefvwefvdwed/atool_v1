@@ -13,11 +13,9 @@ Resend status codes handled:
 
 import os
 import resend
-from dotenv_vault import load_dotenv
+from envvault import load_env
 from error_notifier import notify_error, ErrorType
-
-load_dotenv()
-
+load_env()
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
 RESEND_SENDER_EMAIL = os.getenv("EMAIL_FROM", "noreply@yourdomain.com")
 RESEND_SENDER_NAME = os.getenv("RESEND_SENDER_NAME", "Ashel-Free AI Studio")

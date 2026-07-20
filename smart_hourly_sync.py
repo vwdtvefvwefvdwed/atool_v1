@@ -8,11 +8,9 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional, List
-from dotenv_vault import load_dotenv
+from envvault import load_env
 from supabase import create_client, Client
-
-load_dotenv()
-
+load_env()
 # OLD account configuration (source - current production)
 OLD_SUPABASE_URL = os.getenv('SUPABASE_URL')
 OLD_SUPABASE_KEY = os.getenv('SUPABASE_SERVICE_ROLE_KEY')

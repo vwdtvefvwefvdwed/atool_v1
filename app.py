@@ -9,7 +9,7 @@ from datetime import datetime
 import requests
 from flask import Flask, jsonify, request, Response, stream_with_context
 from flask_cors import CORS
-from dotenv_vault import load_dotenv
+from envvault import load_env
 
 # Import ngrok for public URL tunneling (optional)
 try:
@@ -85,8 +85,7 @@ ping_all_workers_async()
 
 # Configure CORS to allow requests from frontend
 # This fixes the "No 'Access-Control-Allow-Origin' header" error
-load_dotenv()
-
+load_env()
 # Get environment URLs for CORS
 BACKEND_URL = os.getenv("BACKEND_URL", "https://api.ashel.space")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "https://ashel.space")
@@ -2736,13 +2735,58 @@ def execute_workflow():
         # Extract optional player for multi-character workflows (e.g. FIFA Legend Mode)
         player = request.form.get('player')
 
-        # Extract optional reference_image_url — the BASE scene for gallery-driven
-        # workflows (e.g. common-workflow / Gallery Remix). The frontend sends the
-        # clicked gallery card's image_url (sourced from the static pool.json), so
-        # the workflow edits that image without any Supabase lookup.
+        # Gallery Remix (common-workflow): the frontend sends ONLY the selected
+        # gallery image's id (`reference_id`). The per-image PROMPT is resolved
+        # server-side LIVE from the gallery Supabase project (prompt_store) — the
+        # gallery image itself is NEVER used as a model reference. Generation
+        # uses the user's uploaded photo + the resolved prompt only.
+        #
+        # `reference_image_url` is still parsed ONLY to recognise legacy
+        # requests from old cached frontends; it is never sent to the model.
         reference_image_url = request.form.get('reference_image_url')
         if reference_image_url and not reference_image_url.startswith(('http://', 'https://')):
             reference_image_url = None
+
+        reference_id = request.form.get('reference_id')
+        reference_prompt = None
+        if reference_id is not None and str(reference_id).strip() != '':
+            try:
+                reference_id = int(str(reference_id).strip())
+                if reference_id <= 0:
+                    raise ValueError
+            except (TypeError, ValueError):
+                return jsonify({
+                    "success": False,
+                    "error": "Invalid reference_id"
+                }), 400
+
+            from workflows.common_workflow.prompt_store import (
+                get_prompt_store,
+                PROMPT_LOOKUP_UNAVAILABLE,
+            )
+            _store = get_prompt_store()
+            _entry = _store.resolve(reference_id)
+            if _entry is PROMPT_LOOKUP_UNAVAILABLE:
+                # Gallery Supabase not configured / unreachable — degrade to the
+                # workflow's default prompts instead of blocking generation.
+                print(f"⚠️ Gallery prompt lookup unavailable — id {reference_id} "
+                      f"unresolved; falling back to default prompts")
+            elif _entry is not None:
+                reference_prompt = _entry.get('prompt')
+                print(f"🎯 Gallery Remix: resolved prompt for image id {reference_id} "
+                      f"(live gallery DB)")
+            else:
+                # Gallery DB is reachable but the id does not exist: the visitor
+                # holds a stale cached pool.json, or the image was deleted.
+                print(f"⚠️ Gallery Remix: unknown reference_id {reference_id} "
+                      f"— rejecting")
+                return jsonify({
+                    "success": False,
+                    "error": "gallery_image_expired",
+                    "message": "This gallery image is no longer available — please pick another one."
+                }), 410
+        else:
+            reference_id = None
 
         workflow_manager = get_workflow_manager()
         workflow = workflow_manager.get_workflow(workflow_id)
@@ -2781,7 +2825,20 @@ def execute_workflow():
                 print(f"📤 Uploaded workflow input image: {input_image_url}")
             except Exception as upload_error:
                 print(f"⚠️ Failed to upload input image: {upload_error}")
-                # Reset file pointer for workflow to use
+                # Workflows that carry structured input (gender/player/gallery
+                # reference) REQUIRE a hosted image URL: the dict input built in
+                # run_workflow() is only assembled from a string URL, so falling
+                # back to the raw FileStorage would silently DROP the resolved
+                # reference_prompt/gender and then hard-fail inside the workflow
+                # with a confusing "requires an uploaded face image" error.
+                # Fail fast with a clear, retryable message instead.
+                if gender_version or player or reference_id:
+                    return jsonify({
+                        "success": False,
+                        "error": "Failed to process your uploaded photo. Please try again."
+                    }), 503
+                # Legacy bare-file workflows: reset pointer so the workflow can
+                # still consume the file directly.
                 input_file.seek(0)
         
         job_result = create_job(
@@ -2826,13 +2883,18 @@ def execute_workflow():
             asyncio.set_event_loop(loop)
             try:
                 # Build input_data: dict when gender_version, player, or a gallery
-                # reference image is present, else raw URL for backward compat.
+                # selection is present, else raw URL for backward compat.
+                # reference_prompt = the per-image prompt resolved live from the
+                # gallery Supabase project (common-workflow). reference_image_url is
+                # legacy-only and ignored by the common workflow (no image ref).
                 wf_input = input_image_url or input_file
-                if (gender_version or player or reference_image_url) and isinstance(wf_input, str):
+                if (gender_version or player or reference_id or reference_image_url) and isinstance(wf_input, str):
                     wf_input = {
                         'image_url': input_image_url,
                         'gender_version': gender_version,
                         'player': player,
+                        'reference_id': reference_id,
+                        'reference_prompt': reference_prompt,
                         'reference_image_url': reference_image_url,
                     }
                 loop.run_until_complete(

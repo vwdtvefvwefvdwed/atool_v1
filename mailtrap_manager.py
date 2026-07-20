@@ -12,11 +12,9 @@ Mailtrap status codes handled:
 
 import os
 import mailtrap as mt
-from dotenv_vault import load_dotenv
+from envvault import load_env
 from error_notifier import notify_error, ErrorType
-
-load_dotenv()
-
+load_env()
 MAILTRAP_API_TOKEN = os.getenv("MAILTRAP_API_TOKEN")
 MAILTRAP_SENDER_EMAIL = os.getenv("MAILTRAP_SENDER_EMAIL")
 MAILTRAP_SENDER_NAME = os.getenv("MAILTRAP_SENDER_NAME", "Ashel-Free AI Studio")

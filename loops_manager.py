@@ -22,11 +22,9 @@ Loops status codes handled:
 
 import os
 import requests
-from dotenv_vault import load_dotenv
+from envvault import load_env
 from error_notifier import notify_error, ErrorType
-
-load_dotenv()
-
+load_env()
 LOOPS_API_KEY = os.getenv("LOOPS_API_KEY")
 LOOPS_TRANSACTIONAL_ID = os.getenv("LOOPS_TRANSACTIONAL_ID")
 

@@ -8,12 +8,9 @@ import os
 import asyncio
 import threading
 from typing import Dict, Optional, Any
-from dotenv_vault import load_dotenv
+from envvault import load_env
 from provider_api_keys import get_worker1_client
-
-load_dotenv()
-
-
+load_env()
 class ModelQuotaManager:
     """
     Manages model quotas with realtime synchronization.

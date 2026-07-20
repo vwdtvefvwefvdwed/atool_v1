@@ -6,12 +6,11 @@ Automatically switches to backup account on rate limits
 
 import os
 from supabase import Client
-from dotenv_vault import load_dotenv
+from envvault import load_env
 from supabase_failover import get_failover_manager, get_supabase_client
 
 # Load environment variables
-load_dotenv()
-
+load_env()
 # Initialize failover manager
 _failover_manager = get_failover_manager()
 

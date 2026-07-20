@@ -16,7 +16,7 @@
   },
   "supported_models": {
     "generate_poses": [
-      "nano-banana-ondemand"
+      "gpt-image-2-ondemand"
     ]
   },
   "steps": [
@@ -33,7 +33,7 @@
       "type": "generation",
       "description": "Generate 5 cinematic poses for speed-ramp reel editing",
       "model_type": "image",
-      "default_model": "nano-banana-ondemand",
+      "default_model": "gpt-image-2-ondemand",
       "provider": "vision-ondemand"
     }
   ],

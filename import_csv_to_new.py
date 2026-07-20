@@ -8,11 +8,9 @@ import os
 import csv
 import sys
 from datetime import datetime, timezone
-from dotenv_vault import load_dotenv
+from envvault import load_env
 from supabase import create_client
-
-load_dotenv()
-
+load_env()
 NEW_SUPABASE_URL = os.getenv('NEW_SUPABASE_URL')
 NEW_SUPABASE_KEY = os.getenv('NEW_SUPABASE_SERVICE_ROLE_KEY')
 

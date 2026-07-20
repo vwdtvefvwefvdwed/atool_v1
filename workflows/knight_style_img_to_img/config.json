@@ -13,7 +13,7 @@
   },
   "supported_models": {
     "image_edit": [
-      "nano-banana-ondemand"
+      "gpt-image-2-ondemand"
     ],
     "upscale": [
       "clipdrop-upscale"
@@ -33,7 +33,7 @@
       "type": "generation",
       "description": "AI-powered Knight style transformation",
       "model_type": "image",
-      "default_model": "nano-banana-ondemand",
+      "default_model": "gpt-image-2-ondemand",
       "provider": "vision-ondemand"
     },
     {

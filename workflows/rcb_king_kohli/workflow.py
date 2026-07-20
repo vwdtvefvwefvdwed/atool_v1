@@ -72,7 +72,7 @@ class RcbKingKohliWorkflow(BaseWorkflow):
         logger.info("Starting RCB King Kohli face swap step")
         endpoint_manager = get_endpoint_manager()
 
-        model = step_config.get('model', step_config.get('default_model', 'nano-banana-ondemand'))
+        model = step_config.get('model', step_config.get('default_model', 'gpt-image-2-ondemand'))
         provider = step_config.get('provider', 'vision-ondemand')
 
         # Select prompt based on gender_version passed from upload step

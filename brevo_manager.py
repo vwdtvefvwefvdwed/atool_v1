@@ -17,11 +17,9 @@ Brevo status codes handled:
 import os
 import sib_api_v3_sdk
 from sib_api_v3_sdk.rest import ApiException
-from dotenv_vault import load_dotenv
+from envvault import load_env
 from error_notifier import notify_error, ErrorType
-
-load_dotenv()
-
+load_env()
 BREVO_API_KEY = os.getenv("BREVO_API_KEY")
 BREVO_SENDER_EMAIL = os.getenv("BREVO_SENDER_EMAIL")
 BREVO_SENDER_NAME = os.getenv("BREVO_SENDER_NAME", "Ashel-Free AI Studio")

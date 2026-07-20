@@ -23,10 +23,8 @@ import threading
 import queue
 import time
 from typing import Dict, Set
-from dotenv_vault import load_dotenv
-
-load_dotenv()
-
+from envvault import load_env
+load_env()
 # Constants
 MAX_RECONNECT_DELAY = 30      # Max seconds between reconnect attempts
 INITIAL_RECONNECT_DELAY = 1   # Initial reconnect delay in seconds

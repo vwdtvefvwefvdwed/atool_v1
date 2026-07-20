@@ -15,11 +15,10 @@ import sys
 import threading
 import signal
 import time
-from dotenv_vault import load_dotenv
+from envvault import load_env
 
 # Load environment variables
-load_dotenv()
-
+load_env()
 # Import Flask app
 from app import app
 

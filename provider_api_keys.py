@@ -9,13 +9,11 @@ Main Supabase account handles users, auth, jobs - Worker1 handles API keys.
 import os
 from typing import Optional, Dict, Any
 from supabase import create_client, Client
-from dotenv_vault import load_dotenv
+from envvault import load_env
 import api_key_round_robin
 import api_key_status_manager
 from provider_constants import NO_DELETE_ROTATE_PROVIDERS
-
-load_dotenv()
-
+load_env()
 WORKER_1_URL = os.getenv("WORKER_1_URL")
 WORKER_1_SERVICE_KEY = os.getenv("WORKER_1_SERVICE_ROLE_KEY")
 
@@ -325,8 +323,7 @@ def map_model_to_provider(model_name: str, job_type: str = "image") -> Optional[
             "gemini-3-pro-web",
         ],
     "vision-ondemand": [
-        "nano-banana-ondemand",
-        "nano-banana-2-ondemand",
+        "gpt-image-2-ondemand",
     ],
 }
     

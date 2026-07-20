@@ -6,11 +6,9 @@ Handles uploading images to Mega.nz and generating public share links
 import os
 import tempfile
 from pathlib import Path
-from dotenv_vault import load_dotenv
+from envvault import load_env
 from mega import Mega
-
-load_dotenv()
-
+load_env()
 class MegaStorage:
     """Mega cloud storage handler for image uploads"""
     

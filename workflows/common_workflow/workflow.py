@@ -10,39 +10,46 @@ logger = logging.getLogger(__name__)
 
 class CommonWorkflowWorkflow(BaseWorkflow):
     """
-    Gallery Remix — a generic face swap that works on ANY image the user picked
-    from the spherical gallery. Unlike the team workflows (CSK/MI/RCB) which bake
-    a fixed `reference_image_b` into config.json, here the BASE SCENE is dynamic:
-    it is the gallery card's image_url, sent by the frontend in the request payload
-    (sourced from the static pool.json). This workflow NEVER reads the image list or
-    the reference image from Supabase — the reference arrives only via the payload.
+    Gallery Remix — regenerates the USER into the scene of any gallery card.
+
+    NO REFERENCE IMAGE is used anywhere in this workflow. The frontend sends
+    only the selected pool.json image's id; app.py resolves the matching
+    per-image PROMPT live from the gallery Supabase project (prompt_store.py,
+    GALLERY_SUPABASE_URL) and passes it in as `reference_prompt`. Generation
+    inputs are exactly two things:
+
+        1. the user's uploaded photo (identity), and
+        2. the composed prompt (gender identity template + per-image scene prompt).
+
+    This workflow itself never queries a database and never forwards a gallery
+    image to the model.
 
     Pipeline:
-      upload  -> pass through the uploaded face + the gallery reference + gender
-      image_edit -> swap the uploaded identity onto the gallery base scene
+      upload     -> pass through the uploaded face + gender + resolved prompt
+      image_edit -> single-image edit: re-render the user into the scene
     """
 
     async def step_upload(self, input_file: Any, step_config: Dict) -> Dict[str, Any]:
         try:
             logger.info("Processing image upload step (common-workflow)")
 
-            # app.py sends a dict here: the uploaded face (image_url), the gallery
-            # reference scene (reference_image_url), and the gender_version.
+            # app.py sends a dict here: the uploaded face (image_url), the
+            # gender_version, and the per-image prompt resolved by id
+            # (reference_prompt; may be None -> default template only).
             if isinstance(input_file, dict):
                 image_url = input_file.get('image_url')
                 if not image_url:
                     raise HardError("No image_url (uploaded face) found in input data")
 
-                reference_image_url = input_file.get('reference_image_url')
-                if not reference_image_url:
-                    # The base scene MUST come from the frontend (gallery/pool.json).
-                    raise HardError("No reference_image_url (gallery image) found in input data")
-
-                logger.info(f"Face (Image A): {image_url}")
-                logger.info(f"Gallery reference scene (base): {reference_image_url}")
+                reference_prompt = input_file.get('reference_prompt')
+                logger.info(f"Face (user identity): {image_url}")
+                logger.info(
+                    "Per-image scene prompt: "
+                    + (f"{reference_prompt[:80]}..." if reference_prompt else "none (default template only)")
+                )
                 return {
                     "image_url": image_url,
-                    "reference_image_url": reference_image_url,
+                    "reference_prompt": reference_prompt,
                     "public_id": None,
                     "format": 'jpg',
                     "width": None,
@@ -50,9 +57,21 @@ class CommonWorkflowWorkflow(BaseWorkflow):
                     "gender_version": input_file.get('gender_version')
                 }
 
-            # A bare string means no reference image was supplied — this workflow
-            # cannot run without a gallery base scene.
-            raise HardError("Gallery Remix requires a reference image selected from the gallery")
+            # A bare string is just the uploaded face — run with the default
+            # template (legacy requests from old cached frontends).
+            if isinstance(input_file, str) and input_file:
+                logger.info("Legacy input (bare URL) — no per-image prompt")
+                return {
+                    "image_url": input_file,
+                    "reference_prompt": None,
+                    "public_id": None,
+                    "format": 'jpg',
+                    "width": None,
+                    "height": None,
+                    "gender_version": None
+                }
+
+            raise HardError("Gallery Remix requires an uploaded face image")
         except HardError:
             raise
         except Exception as e:
@@ -65,53 +84,58 @@ class CommonWorkflowWorkflow(BaseWorkflow):
                 )
             raise HardError(f"Failed to process input: {e}")
 
+    def _compose_prompt(self, template: str, scene_prompt: str) -> str:
+        """Final prompt = gender identity template + the per-image scene prompt
+        resolved live from the gallery project. The template stays authoritative for
+        identity-preservation rules; the scene prompt supplies the look/scene of
+        the gallery card the user picked. Kept in ONE place so prompt tuning
+        never touches pipeline logic."""
+        if not scene_prompt:
+            return template
+        return (
+            f"{template}\n\n"
+            "SCENE / STYLE DESCRIPTION (recreate this scene around the person):\n"
+            f"{scene_prompt}"
+        )
+
     async def step_image_edit(self, input_data: Dict, step_config: Dict) -> Dict[str, Any]:
         from multi_endpoint_manager import get_endpoint_manager
 
-        logger.info("Starting Gallery Remix face swap step")
+        logger.info("Starting Gallery Remix generation step")
         endpoint_manager = get_endpoint_manager()
 
-        model = step_config.get('model', step_config.get('default_model', 'nano-banana-ondemand'))
+        model = step_config.get('model', step_config.get('default_model', 'gpt-image-2-ondemand'))
         provider = step_config.get('provider', 'vision-ondemand')
 
-        # Select prompt based on gender_version passed from the upload step.
+        # Select the identity template based on gender_version from the upload step.
         gender_version = input_data.get('gender_version') or 'male'
         prompt_key = f'image_edit_{gender_version}'
-        prompt = self.config['default_prompts'].get(prompt_key)
-        if not prompt:
-            prompt = self.config['default_prompts'].get('image_edit', self.config['default_prompts'].get('image_edit_male'))
+        template = self.config['default_prompts'].get(prompt_key)
+        if not template:
+            template = self.config['default_prompts'].get('image_edit', self.config['default_prompts'].get('image_edit_male'))
             logger.warning(f"Prompt key '{prompt_key}' not found, using fallback")
 
-        logger.info(f"Using gender_version: {gender_version}, prompt_key: {prompt_key}")
+        # Compose with the per-image prompt (may be None -> template only).
+        scene_prompt = input_data.get('reference_prompt')
+        prompt = self._compose_prompt(template, scene_prompt)
 
-        # Image A = user's uploaded face (identity source).
-        # Base scene = the gallery image the user clicked (from pool.json), NOT a
-        # fixed config image and NOT fetched from Supabase.
+        logger.info(f"Using gender_version: {gender_version}, prompt_key: {prompt_key}")
+        logger.info(f"Per-image scene prompt applied: {bool(scene_prompt)}")
+
+        # SINGLE-IMAGE generation: the ONLY image sent to the model is the
+        # user's uploaded photo (identity/base canvas). The gallery image is
+        # never forwarded — its scene is reproduced from the prompt alone.
         user_face_url = input_data['image_url']
-        base_scene_url = input_data.get('reference_image_url')
-        if not base_scene_url:
-            raise HardError("Missing reference_image_url at image_edit step")
 
         logger.info(f"Using model: {model}, provider: {provider}")
-        logger.info(f"Base scene (gallery image): {base_scene_url}")
-        logger.info(f"Image A (user face/identity): {user_face_url}")
+        logger.info(f"Input image (user face/identity): {user_face_url}")
         logger.info(f"Prompt: {prompt[:100]}...")
 
-        # We want a BRAND-NEW image that RE-RENDERS the real user (identity, body,
-        # skin tone) into the STYLE of the gallery image — NOT a head-swap that
-        # pastes the user's face onto the gallery scene.
-        #
-        # Nano Banana EDITS the FIRST image in the array (it is the base canvas).
-        # So the user's photo MUST be first (keep the real person) and the gallery
-        # image is the SECOND/style reference (apply its look, scene, lighting).
-        # This is the opposite order from the team workflows (CSK/MI/RCB), which
-        # intentionally do a face-swap onto a fixed scene.
         generation_params = {
             'prompt': prompt,
             'model': model,
             'provider_key': provider,
-            'input_image_url': user_face_url,         # FIRST = base canvas (USER identity/body/skin)
-            'reference_image_url': base_scene_url,    # SECOND = style/scene reference (gallery)
+            'input_image_url': user_face_url,  # the ONLY image: user identity/base canvas
             'aspect_ratio': '1:1',
             'job_id': self.job_id
         }

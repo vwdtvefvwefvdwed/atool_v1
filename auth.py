@@ -7,16 +7,14 @@ import os
 import uuid
 import jwt
 from datetime import datetime, timedelta
-from dotenv_vault import load_dotenv
+from envvault import load_env
 from supabase_client import supabase
 from supabase_failover import execute_with_failover, get_failover_manager, is_supabase_maintenance_window, is_maintenance_error
 import brevo_manager
 import mailtrap_manager
 import resend_manager
 import loops_manager
-
-load_dotenv()
-
+load_env()
 # Configuration
 JWT_SECRET = os.getenv("JWT_SECRET")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")

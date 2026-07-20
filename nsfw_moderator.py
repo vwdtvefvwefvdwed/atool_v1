@@ -7,10 +7,8 @@ Falls back to .env keys if the database is unavailable.
 
 import os
 import requests
-from dotenv_vault import load_dotenv
-
-load_dotenv()
-
+from envvault import load_env
+load_env()
 PROVIDER_NAME = "vision-rapidapi"
 
 

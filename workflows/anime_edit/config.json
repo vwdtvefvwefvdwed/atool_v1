@@ -22,7 +22,7 @@
   },
   "supported_models": {
     "generate_poses": [
-      "nano-banana-ondemand"
+      "gpt-image-2-ondemand"
     ],
     "generate_videos": [
       "ltx2-19b-dist-fp8-deapi"
@@ -42,7 +42,7 @@
       "type": "generation",
       "description": "Generate 5 cinematic poses for the anime edit",
       "model_type": "image",
-      "default_model": "nano-banana-ondemand",
+      "default_model": "gpt-image-2-ondemand",
       "provider": "vision-ondemand"
     },
     {

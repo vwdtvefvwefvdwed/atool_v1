@@ -9,10 +9,8 @@ import threading
 from typing import Optional, Any
 from datetime import datetime, timezone
 from supabase import create_client, Client
-from dotenv_vault import load_dotenv
-
-load_dotenv()
-
+from envvault import load_env
+load_env()
 # Account configurations
 MAIN_SUPABASE_URL = os.getenv("SUPABASE_URL")
 MAIN_SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")

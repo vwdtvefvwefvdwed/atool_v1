@@ -8,11 +8,9 @@ import time
 import uuid
 import threading
 from datetime import datetime
-from dotenv_vault import load_dotenv
+from envvault import load_env
 from supabase import create_client
-
-load_dotenv()
-
+load_env()
 # Worker configurations
 WORKERS = [
     {

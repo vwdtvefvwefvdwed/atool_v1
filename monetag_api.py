@@ -11,10 +11,8 @@ import logging
 import requests
 from typing import Optional, Dict, Any
 from datetime import datetime
-from dotenv_vault import load_dotenv
-
-load_dotenv()
-
+from envvault import load_env
+load_env()
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

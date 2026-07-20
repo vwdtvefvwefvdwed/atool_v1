@@ -9,10 +9,8 @@ import time
 import psutil
 import signal
 from pathlib import Path
-from dotenv_vault import load_dotenv
-
-load_dotenv()
-
+from envvault import load_env
+load_env()
 MAINTENANCE_FLAG_FILE = Path(__file__).parent / ".maintenance_mode"
 CHECK_INTERVAL = 5
 

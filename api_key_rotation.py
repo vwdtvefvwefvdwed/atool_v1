@@ -449,19 +449,33 @@ ERROR_PATTERNS = {
             r"rate limit",
             r"too many requests",
         ],
-        "credit_exceeded": _COMMON_CREDIT_PATTERNS + [
-            r"402",
-            r"payment required",
-            r"credit exhausted",
+        # OnDemand: curated set (like "aicc") — the key is DELETED only when the
+        # error unambiguously means the key is exhausted or dead. Broad patterns
+        # from _COMMON_CREDIT_PATTERNS (r"billing", r"subscription", r"expired",
+        # r"forbidden", r"403", ...) are intentionally excluded. Agent/config
+        # errors (invalid agent, no executable plugin) are classified as
+        # agent_infra_error in detect_error_type, and r"invalid_request" was
+        # removed so it falls through to generic_error (round-robin rotation,
+        # NO deletion).
+        "credit_exceeded": [
+            # true credit exhaustion — tolerant of wording like
+            # "credit exhausted", "credits are exhausted", "credits have been exhausted"
+            r"credits?\b.{0,40}exhaust",
+            r"exhausted?\b.{0,40}credit",
             r"insufficient credit",
+            r"insufficient_credit",
+            r"not enough credit",
+            r"payment required",
+            r"payment_required",
+            r"402",
+            r"quota.*exhaust",
+            # dead/invalid key — OnDemand returns these only for revoked/bad keys
             r"401",
             r"unauthorized",
             r"invalid api key",
+            r"invalid_api_key",
             r"api key not found",
             r"authentication failed",
-            r"errors\.no\.executable\.plugin\.found",
-            r"invalid_request",
-            r"invalid agent",
         ],
     },
 }
@@ -507,6 +521,10 @@ def detect_error_type(error_message: str, provider: str) -> Optional[str]:
         "cloud_name is disabled",
         "cloud_name disabled",
         "image editing failed",
+        # On-Demand agent/config errors: shared across ALL keys — rotating or
+        # deleting keys cannot fix a bad agent id / missing plugin.
+        "errors.no.executable.plugin.found",
+        "invalid agent",
     ]
     if any(x in error_msg_lower for x in _AGENT_INFRA_INDICATORS):
         return "agent_infra_error"

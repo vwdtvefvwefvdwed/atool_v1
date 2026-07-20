@@ -31,12 +31,9 @@ import requests
 import base64
 import json
 from urllib.parse import urlparse, unquote
-from dotenv_vault import load_dotenv
+from envvault import load_env
 import replicate
-
-load_dotenv()
-
-
+load_env()
 def get_image_format_from_url(url):
     """
     Detect image format from URL path extension or Cloudinary f_FORMAT transform params.
@@ -367,8 +364,7 @@ GEMINI_WEB_API_MODELS = {
 # On-Demand API Models - https://api.on-demand.io
 # Uses API key + workflow ID with webhook callback for result delivery
 ONDEMAND_MODELS = {
-'nano-banana-ondemand': 'nano-banana',
-'nano-banana-2-ondemand': 'nano-banana-2',
+'gpt-image-2-ondemand': 'gpt-image-2',
 }
 
 def generate_with_gemini(prompt, model, aspect_ratio, api_key, input_image_url=None, job_type="image", duration=5):
@@ -4892,47 +4888,25 @@ def generate(prompt, model, aspect_ratio, api_key, provider_key=None, input_imag
         finally:
             loop.close()
     elif endpoint_type == "ondemand":
-        # Determine if using Agent API (sync mode) or Workflow API (webhook mode)
-        from provider_api_keys import get_provider_api_key
-        import json
-        cred_record = get_provider_api_key(provider_key or "vision-ondemand")
-        raw_json = cred_record.get("api_key") if cred_record else None
-        use_agent_api = False
-        if raw_json:
-            try:
-                data = json.loads(raw_json)
-                if "agent_ids" in data:
-                    use_agent_api = True
-            except Exception:
-                pass
-        if use_agent_api:
-            from ondemand_agent_provider import generate_with_ondemand_agent
-            return generate_with_ondemand_agent(
-                prompt=prompt,
-                model=model,
-                aspect_ratio=aspect_ratio,
-                api_key=api_key,
-                input_image_url=input_image_url,
-                job_type=job_type,
-                duration=duration,
-                provider_key=provider_key or "vision-ondemand",
-                job_id=job_id,
-                use_direct_agent=True,  # Use direct Nano Banana PRO when images provided
-                **kwargs,
-            )
-        else:
-            from ondemand_provider import generate_with_ondemand
-            return generate_with_ondemand(
-                prompt=prompt,
-                model=model,
-                aspect_ratio=aspect_ratio,
-                api_key=api_key,
-                input_image_url=input_image_url,
-                job_type=job_type,
-                duration=duration,
-                provider_key=provider_key or "vision-ondemand",
-                job_id=job_id,
-            )
+        # All On-Demand generation goes through the Agent API CHAT ORCHESTRATOR
+        # (stream mode). The serverless direct endpoints and the Workflow API
+        # (webhook/polling) routing were removed. Credentials only need an
+        # api_key; agent_ids / endpoint_id / reasoning_mode fall back to the
+        # defaults in ondemand_agent_provider (agent-1776826082,
+        # predefined-gemini-3.5-flash, gemini-3-flash).
+        from ondemand_agent_provider import generate_with_ondemand_agent
+        return generate_with_ondemand_agent(
+            prompt=prompt,
+            model=model,
+            aspect_ratio=aspect_ratio,
+            api_key=api_key,
+            input_image_url=input_image_url,
+            job_type=job_type,
+            duration=duration,
+            provider_key=provider_key or "vision-ondemand",
+            job_id=job_id,
+            **kwargs,
+        )
     else:
         raise Exception(f"Unsupported endpoint type: {endpoint_type}")
 

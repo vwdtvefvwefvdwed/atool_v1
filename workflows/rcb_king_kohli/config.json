@@ -15,7 +15,7 @@
   "reference_image_b": "https://res.cloudinary.com/dnagl4r2t/image/upload/v1775980698/gemini-3.1-flash-image-preview_nano-banana-2__a_A_realistic__high-qu_wlmswh.png",
   "supported_models": {
     "image_edit": [
-      "nano-banana-ondemand"
+      "gpt-image-2-ondemand"
     ],
     "upscale": [
       "clipdrop-upscale"
@@ -35,7 +35,7 @@
       "type": "generation",
       "description": "AI-powered RCB face swap with identity preservation",
       "model_type": "image",
-      "default_model": "nano-banana-ondemand",
+      "default_model": "gpt-image-2-ondemand",
       "provider": "vision-ondemand"
     },
     {

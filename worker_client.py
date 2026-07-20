@@ -280,11 +280,10 @@ if __name__ == "__main__":
     # Test the worker client
     import os
     import uuid
-    from dotenv_vault import load_dotenv
+    from envvault import load_env
     
     # Load environment variables
-    load_dotenv()
-    
+    load_env()
     logging.basicConfig(level=logging.INFO)
     
     try:
