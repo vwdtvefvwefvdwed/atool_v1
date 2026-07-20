@@ -29,9 +29,14 @@ def _parse_ondemand_agent_credentials(raw: str) -> Dict[str, Any]:
     """Parse provider credentials for the Agent (chat orchestrator) API.
 
     Accepted formats:
-      - JSON object: {"api_key": ..., "agent_ids": [...], "endpoint_id": ...,
-        "reasoning_mode": ...} — only ``api_key`` is required; the rest fall
-        back to the defaults above.
+      - JSON object: {"api_key": ..., ...} — only ``api_key`` is read.
+        Any stored ``agent_ids`` / ``endpoint_id`` / ``reasoning_mode`` are
+        IGNORED: the chat-orchestrator path always uses the built-in
+        module-level defaults (subscribed "Nano Banana Tool" agent, the
+        predefined Gemini endpoint and reasoning mode). This prevents stale
+        per-key overrides (e.g. an agent id no longer subscribed) from
+        breaking every generation with `One or more agents are not
+        subscribed: Nano Banana Tool`.
       - Plain string: treated as the API key itself.
     """
     try:
@@ -43,14 +48,11 @@ def _parse_ondemand_agent_credentials(raw: str) -> Dict[str, Any]:
     api_key = data.get("api_key")
     if not api_key:
         raise ValueError("On-Demand agent credentials missing 'api_key'")
-    agent_ids = data.get("agent_ids") or list(DEFAULT_AGENT_IDS)
-    if isinstance(agent_ids, str):
-        agent_ids = [agent_ids]
     return {
         "api_key": api_key,
-        "agent_ids": agent_ids,
-        "endpoint_id": data.get("endpoint_id") or DEFAULT_ENDPOINT_ID,
-        "reasoning_mode": data.get("reasoning_mode") or DEFAULT_REASONING_MODE,
+        "agent_ids": list(DEFAULT_AGENT_IDS),
+        "endpoint_id": DEFAULT_ENDPOINT_ID,
+        "reasoning_mode": DEFAULT_REASONING_MODE,
     }
 
 def _create_chat_session(api_key: str, external_user_id: str, agent_ids: List[str], context_metadata: List[Dict[str, str]]) -> str:
