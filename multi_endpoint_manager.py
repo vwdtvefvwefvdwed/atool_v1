@@ -596,8 +596,9 @@ ENDPOINT_IMAGE_INPUT_SUPPORT = {
 ],
 },
 'ondemand': {
-'supported': False,
-'notes': 'On-Demand API is text-to-image only. Uses webhook for result delivery. Stores API key + workflow_id as JSON.',
+'supported': True,
+'notes': 'On-Demand chat orchestrator supports text-to-image AND image-to-image (reference URLs are handed to the image agent in the query). Aspect ratio is honoured via a prompt hint: 1:1/16:9/3:2 exact, 9:16 clamps to ~2:3 portrait (verified 2026-07).',
+'models_supporting_image': ['gpt-image-2-ondemand'],
 },
 }
 
@@ -664,7 +665,7 @@ PROVIDER_ALLOWED_IMAGE_FORMATS = {
     'cinematic-aicc':       ['jpg', 'jpeg', 'png', 'webp'],
     'vision-felo':          [],
 'vision-geminiwebapi': ['jpg', 'jpeg', 'png', 'webp'], # NEW: Accepts images for editing (img2img)
-'vision-ondemand': [], # NEW: Text-to-image only, webhook-based
+'vision-ondemand': ['jpg', 'jpeg', 'png', 'webp'], # Chat orchestrator: t2i + i2i via reference URLs
 }
 
 
@@ -4555,7 +4556,9 @@ def generate_with_felo(prompt, model, aspect_ratio, api_key, input_image_url=Non
                     return iid
             return None
 
-        for attempt in range(60):           # up to ~5 minutes
+        # Poll timeout is configurable via FELO_POLL_ATTEMPTS (default 120 x 5s = ~10 minutes)
+        felo_poll_attempts = int(os.getenv("FELO_POLL_ATTEMPTS", "120"))
+        for attempt in range(felo_poll_attempts):
             time.sleep(5)
 
             # Poll livedoc resources
@@ -4600,7 +4603,7 @@ def generate_with_felo(prompt, model, aspect_ratio, api_key, input_image_url=Non
                     break
 
         if not item_id:
-            raise Exception("Felo image generation failed: no completed image resource found after ~5 minutes of polling")
+            raise Exception(f"Felo image generation failed: no completed image resource found after ~{(felo_poll_attempts * 5) // 60} minutes of polling")
 
         # ── Step 4: Get S3 pre-signed download URL ────────────────────────────
         dl_url  = f"{BASE}/v2/livedocs/{live_doc_id}/resources/{item_id}/download"

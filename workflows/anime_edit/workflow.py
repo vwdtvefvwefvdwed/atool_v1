@@ -106,7 +106,7 @@ class AnimeEditWorkflow(BaseWorkflow):
                     model=model,
                     provider_key=provider,
                     input_image_url=user_face_url,
-                    aspect_ratio='9:16',
+                    aspect_ratio=self.requested_aspect_ratio or '9:16',
                     job_id=self.job_id,
                 )
                 pose_url = result.get('image_url') or result.get('url')
@@ -186,7 +186,7 @@ class AnimeEditWorkflow(BaseWorkflow):
                     provider_key=provider,
                     input_image_url=pose_url,
                     duration=VIDEO_DURATION_SEC,
-                    aspect_ratio='9:16',
+                    aspect_ratio=self.requested_aspect_ratio or '9:16',
                     job_id=self.job_id,
                     video_frames=VIDEO_FRAMES,
                     video_fps=VIDEO_FPS,

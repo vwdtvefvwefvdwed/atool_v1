@@ -1477,6 +1477,25 @@ def worker_update_progress(job_id):
 
     print(f"📊 Worker progress update: job_id={job_id}, progress={progress}, message={message}")
 
+    # GUARD: never overwrite a job that was completed/failed/cancelled externally
+    # (e.g. manual Supabase edit). Tell the worker so it stops processing.
+    try:
+        current_resp = supabase.table("jobs").select("status").eq("job_id", job_id).execute()
+        if current_resp.data:
+            current_status = current_resp.data[0].get("status")
+            if current_status in ("completed", "failed", "cancelled"):
+                print(f"🛑 Job {job_id} is already '{current_status}' - rejecting worker progress update and signalling cancellation")
+                from jobs import notify_worker_job_cancelled
+                notify_worker_job_cancelled(job_id, current_status)
+                return jsonify({
+                    "success": False,
+                    "cancelled": True,
+                    "status": current_status,
+                    "error": f"Job is already '{current_status}' - stop processing"
+                }), 409
+    except Exception as guard_err:
+        print(f"⚠️ Could not verify current status for job {job_id}: {guard_err}")
+
     # Update job with progress (note: error_message is for errors, not status messages)
     result = update_job_status(
         job_id,
@@ -1530,6 +1549,25 @@ def worker_complete_job(job_id):
 
     if not image_url:
         return jsonify({"success": False, "error": "image_url required"}), 400
+
+    # GUARD: never overwrite a job that was failed/cancelled externally
+    # (e.g. manual Supabase edit). Tell the worker so it stops processing.
+    try:
+        current_resp = supabase.table("jobs").select("status").eq("job_id", job_id).execute()
+        if current_resp.data:
+            current_status = current_resp.data[0].get("status")
+            if current_status in ("failed", "cancelled"):
+                print(f"🛑 Job {job_id} is already '{current_status}' - rejecting worker completion and signalling cancellation")
+                from jobs import notify_worker_job_cancelled
+                notify_worker_job_cancelled(job_id, current_status)
+                return jsonify({
+                    "success": False,
+                    "cancelled": True,
+                    "status": current_status,
+                    "error": f"Job is already '{current_status}' - result discarded"
+                }), 409
+    except Exception as guard_err:
+        print(f"⚠️ Could not verify current status for job {job_id}: {guard_err}")
 
     result = update_job_result(
         job_id,
@@ -2735,6 +2773,18 @@ def execute_workflow():
         # Extract optional player for multi-character workflows (e.g. FIFA Legend Mode)
         player = request.form.get('player')
 
+        # Optional aspect ratio for workflows that support it (e.g. Gallery Remix
+        # via the On-Demand chat orchestrator). Validated against a whitelist —
+        # anything else silently falls back to 1:1. NOTE: 9:16 is best-effort on
+        # the On-Demand image tool (it clamps extreme portrait to 1024x1536 ≈ 2:3).
+        ALLOWED_WORKFLOW_RATIOS = ('1:1', '16:9', '9:16', '3:2', '2:3', '4:3', '3:4')
+        _aspect_ratio_raw = (request.form.get('aspect_ratio') or '').strip()
+        # aspect_ratio_requested: the client EXPLICITLY picked a valid ratio.
+        # Only then is it forwarded to the workflow — otherwise each workflow
+        # keeps its own default (1:1 portraits, 9:16 posters/reels, ...).
+        aspect_ratio_requested = _aspect_ratio_raw in ALLOWED_WORKFLOW_RATIOS
+        aspect_ratio = _aspect_ratio_raw if aspect_ratio_requested else '1:1'
+
         # Gallery Remix (common-workflow): the frontend sends ONLY the selected
         # gallery image's id (`reference_id`). The per-image PROMPT is resolved
         # server-side LIVE from the gallery Supabase project (prompt_store) — the
@@ -2749,6 +2799,7 @@ def execute_workflow():
 
         reference_id = request.form.get('reference_id')
         reference_prompt = None
+        reference_title = None
         if reference_id is not None and str(reference_id).strip() != '':
             try:
                 reference_id = int(str(reference_id).strip())
@@ -2773,8 +2824,11 @@ def execute_workflow():
                       f"unresolved; falling back to default prompts")
             elif _entry is not None:
                 reference_prompt = _entry.get('prompt')
+                # The gallery image's display name — shown to the user in the
+                # job status / result instead of the generic workflow name.
+                reference_title = (_entry.get('name') or '').strip() or None
                 print(f"🎯 Gallery Remix: resolved prompt for image id {reference_id} "
-                      f"(live gallery DB)")
+                      f"(live gallery DB, title={reference_title!r})")
             else:
                 # Gallery DB is reachable but the id does not exist: the visitor
                 # holds a stale cached pool.json, or the image was deleted.
@@ -2787,6 +2841,14 @@ def execute_workflow():
                 }), 410
         else:
             reference_id = None
+
+        # Fallback title from the frontend (the clicked card's caption) — only
+        # used when the live gallery lookup could not supply a name. Sanitized
+        # and capped so it can safely appear in the job prompt.
+        if reference_id and not reference_title:
+            _client_title = (request.form.get('reference_title') or '').strip()
+            if _client_title:
+                reference_title = ' '.join(_client_title.split())[:80]
 
         workflow_manager = get_workflow_manager()
         workflow = workflow_manager.get_workflow(workflow_id)
@@ -2841,13 +2903,28 @@ def execute_workflow():
                 # still consume the file directly.
                 input_file.seek(0)
         
+        # Job label: for Gallery Remix use the picked image's name (resolved
+        # live from the gallery DB, or the client-sent caption fallback) so the
+        # job status / result show "Workflow: <image name>" instead of the
+        # generic "Workflow: Gallery Remix".
+        job_label = reference_title or workflow['name']
+
         job_result = create_job(
             user_id=user_id,
-            prompt=f"Workflow: {workflow['name']}",
+            prompt=f"Workflow: {job_label}",
             model=workflow_id,
             job_type='workflow',
             image_url=input_image_url,
-            aspect_ratio='1:1'
+            aspect_ratio=aspect_ratio,
+            # Persisted in jobs.metadata so completed/failed jobs are traceable
+            # in Supabase by workflow name AND the exact gallery image variant.
+            extra_metadata={
+                'workflow_id': workflow_id,
+                'workflow_name': workflow['name'],
+                'reference_id': reference_id,
+                'reference_title': reference_title,
+                'requested_aspect_ratio': aspect_ratio if aspect_ratio_requested else None,
+            }
         )
         
         if not job_result.get('success'):
@@ -2888,7 +2965,8 @@ def execute_workflow():
                 # gallery Supabase project (common-workflow). reference_image_url is
                 # legacy-only and ignored by the common workflow (no image ref).
                 wf_input = input_image_url or input_file
-                if (gender_version or player or reference_id or reference_image_url) and isinstance(wf_input, str):
+                if (gender_version or player or reference_id or reference_image_url
+                        or aspect_ratio_requested) and isinstance(wf_input, str):
                     wf_input = {
                         'image_url': input_image_url,
                         'gender_version': gender_version,
@@ -2896,6 +2974,9 @@ def execute_workflow():
                         'reference_id': reference_id,
                         'reference_prompt': reference_prompt,
                         'reference_image_url': reference_image_url,
+                        # None when the client didn't pick a ratio — workflows
+                        # then use their own per-step defaults.
+                        'aspect_ratio': aspect_ratio if aspect_ratio_requested else None,
                     }
                 loop.run_until_complete(
                     workflow_manager.execute_workflow(

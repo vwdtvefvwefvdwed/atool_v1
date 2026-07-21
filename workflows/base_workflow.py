@@ -18,6 +18,10 @@ class BaseWorkflow(ABC):
         self.execution_id: Optional[str] = None
         self.checkpoints: Dict[str, Any] = {}
         self.job_id: Optional[str] = None
+        # User-requested output aspect ratio (validated in app.py). None when
+        # the client didn't pick one — each generation step then falls back to
+        # its own workflow default (e.g. 1:1 portraits, 9:16 reels/posters).
+        self.requested_aspect_ratio: Optional[str] = None
     
     async def execute(
         self, 
@@ -47,6 +51,16 @@ class BaseWorkflow(ABC):
         self.execution_id = execution['id']
         self.checkpoints = execution.get('checkpoints', {})
         self.job_id = job_id
+
+        # Thread the user-requested aspect ratio from the ORIGINAL workflow
+        # input. Resume-safe: resume_workflow() restores checkpoints['_input']
+        # and passes it back in as input_data, so the ratio survives retries.
+        _ar_input = input_data if isinstance(input_data, dict) else (
+            self.checkpoints.get('_input') if isinstance(self.checkpoints.get('_input'), dict) else None
+        )
+        if _ar_input and _ar_input.get('aspect_ratio'):
+            self.requested_aspect_ratio = _ar_input.get('aspect_ratio')
+            logger.info(f"Requested aspect ratio (from workflow input): {self.requested_aspect_ratio}")
 
         # Derive start_step from the execution record itself, not the `resume` flag.
         # _get_or_create_execution() always reuses an existing execution when one is

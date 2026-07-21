@@ -19,6 +19,59 @@ All queries run against the `jobs` and `workflow_executions` tables.
 - `avatar-style-img-to-img`
 - `got-style-img-to-img`
 - `knight-style-img-to-img`
+- `angled-lookback-shot` · `motion-caught-portrait` · `pencil-physique-portrait`
+- `crosshatch-girl-study` · `shadow-contrast-profile` · `veiled-top-angle-portrait`
+- `csk-roar-2k26` · `mi-gangsters` · `rcb-king-kohli` · `fifa-legend-mode`
+- `speed-ramp-edit` · `anime-edit`
+- `common-workflow` (Gallery Remix)
+
+---
+
+## Aspect Ratio & Gallery-Variant Tracking (July 2026)
+
+`POST /workflows/execute` now accepts an optional `aspect_ratio` form field
+(whitelist: `1:1, 16:9, 9:16, 3:2, 2:3, 4:3, 3:4`). Every workflow honours it:
+the validated ratio is threaded through `BaseWorkflow.requested_aspect_ratio`
+(restored from `workflow_executions.checkpoints._input` on resume) and used by
+each generation step as `self.requested_aspect_ratio or '<workflow default>'`
+(portraits default `1:1`; FIFA poster / reel workflows default `9:16`).
+
+**What each Supabase row now stores for workflow jobs:**
+
+| Column | Value |
+|---|---|
+| `jobs.model` | workflow id (e.g. `common-workflow`) — for completed AND failed jobs |
+| `jobs.prompt` | `Workflow: <label>` — for Gallery Remix the label is the **picked image's name** (resolved live from the gallery DB via `reference_id`, or the client caption fallback), not the generic "Gallery Remix" |
+| `jobs.aspect_ratio` | the requested ratio (default `1:1`) |
+| `jobs.metadata` | `workflow_id`, `workflow_name`, `reference_id` (gallery pool image id), `reference_title`, `requested_aspect_ratio` (only when explicitly picked), plus the existing `priority` / `input_image_url` keys |
+| `workflow_executions.checkpoints._input` | full workflow input incl. `reference_id`, `reference_prompt`, `aspect_ratio`, `gender_version`, `player` |
+
+**Find completed/failed Gallery Remix jobs for one specific image variant:**
+
+```sql
+SELECT job_id, status, prompt, aspect_ratio,
+       metadata->>'reference_id'    AS reference_id,
+       metadata->>'reference_title' AS image_name,
+       error_message, created_at
+FROM jobs
+WHERE model = 'common-workflow'
+  AND job_type = 'workflow'
+  AND metadata->>'reference_id' = '26'          -- the pool.json image id
+  AND status IN ('completed', 'failed')
+ORDER BY created_at DESC;
+```
+
+> Jobs created BEFORE this change carry `prompt = 'Workflow: Gallery Remix'`
+> and no `reference_id` in `jobs.metadata` — for those, the image variant is
+> only recoverable from `workflow_executions.checkpoints._input.reference_id`:
+
+```sql
+SELECT j.job_id, j.status, we.checkpoints->'_input'->>'reference_id' AS reference_id
+FROM jobs j
+JOIN workflow_executions we ON we.job_id = j.job_id
+WHERE j.model = 'common-workflow'
+  AND we.checkpoints->'_input'->>'reference_id' = '26';
+```
 
 ---
 

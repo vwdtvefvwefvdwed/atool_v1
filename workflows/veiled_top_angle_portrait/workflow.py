@@ -69,7 +69,7 @@ class VeiledTopAnglePortraitWorkflow(BaseWorkflow):
             'model': model,
             'provider_key': provider,
             'input_image_url': input_data['image_url'],
-            'aspect_ratio': '1:1',
+            'aspect_ratio': self.requested_aspect_ratio or '1:1',
             'job_id': self.job_id
         }
 

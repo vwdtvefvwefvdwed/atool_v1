@@ -57,6 +57,62 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_ANON_KEY")
 VERIFY_SSL = os.getenv("VERIFY_SSL", "False").lower() == "true"
 
+# Maximum number of MAIN API-key rotation attempts per job (applies to ALL providers,
+# both no-delete round-robin and delete-on-failure rotation, for image AND video jobs).
+# After this many key rotations the job is failed completely.
+# NOTE: This does NOT affect inner/sub retries inside individual provider calls.
+MAX_KEY_ROTATION_ATTEMPTS = int(os.getenv("MAX_KEY_ROTATION_ATTEMPTS", "2"))
+
+# ─── Externally-cancelled job registry ────────────────────────────────────────
+# Jobs that were cancelled/failed/completed externally (manual Supabase edit,
+# user cancel, etc.). app.py notifies the worker via POST /worker/cancel-job so
+# in-flight processing/retries for these jobs are stopped.
+CANCELLED_JOBS = {}  # job_id -> timestamp registered
+CANCELLED_JOBS_LOCK = threading.Lock()
+CANCELLED_JOBS_TTL = 3600  # prune entries older than 1 hour
+
+
+def register_job_cancelled(job_id):
+    """Register a job as externally cancelled/terminal (and prune old entries)."""
+    now = time.time()
+    with CANCELLED_JOBS_LOCK:
+        # Prune stale entries so the registry never grows unbounded
+        stale = [jid for jid, ts in CANCELLED_JOBS.items() if now - ts > CANCELLED_JOBS_TTL]
+        for jid in stale:
+            CANCELLED_JOBS.pop(jid, None)
+        CANCELLED_JOBS[job_id] = now
+
+
+def unregister_job_cancelled(job_id):
+    """Remove a job from the cancelled registry (job processing has ended)."""
+    with CANCELLED_JOBS_LOCK:
+        CANCELLED_JOBS.pop(job_id, None)
+
+
+def is_job_cancelled(job_id, check_db=False):
+    """
+    Check whether a job was cancelled/failed/completed externally.
+
+    Fast path: in-memory registry populated by the /worker/cancel-job endpoint.
+    If check_db=True, also verifies the current status in Supabase (covers the
+    case where the HTTP cancel notification never reached this worker).
+    """
+    with CANCELLED_JOBS_LOCK:
+        if job_id in CANCELLED_JOBS:
+            return True
+
+    if check_db:
+        try:
+            from supabase_client import supabase as _sb
+            resp = _sb.table("jobs").select("status").eq("job_id", job_id).single().execute()
+            if resp.data and resp.data.get("status") in ("completed", "failed", "cancelled"):
+                register_job_cancelled(job_id)
+                return True
+        except Exception as _db_err:
+            print(f"[CANCEL-CHECK] Could not verify DB status for job {job_id}: {_db_err}")
+
+    return False
+
 # Health check endpoint for Koyeb
 @app.route("/health", methods=["GET"])
 def health():
@@ -176,6 +232,43 @@ def worker_process_job():
         print(f"[HTTP PUSH] Error processing job: {e}")
         import traceback
         traceback.print_exc()
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/worker/cancel-job", methods=["POST"])
+def worker_cancel_job():
+    """
+    HTTP endpoint for app.py to notify this worker that a job was cancelled,
+    failed, or completed externally (e.g. manual Supabase edit or user cancel).
+
+    The worker registers the job so any in-flight processing, key-rotation
+    retries, and result saving for that job are stopped.
+
+    Returns:
+        - 200: Cancellation registered
+        - 400: Missing job_id
+    """
+    try:
+        data = request.get_json() if request.is_json else {}
+        job_id = data.get("job_id")
+        status = data.get("status", "cancelled")
+
+        if not job_id:
+            return jsonify({"success": False, "error": "job_id required"}), 400
+
+        register_job_cancelled(job_id)
+        print(f"[CANCEL] Job {job_id} registered as terminal (status={status}) via HTTP notification from app.py")
+        sys.stdout.flush()
+
+        return jsonify({
+            "success": True,
+            "job_id": job_id,
+            "status": status,
+            "message": "Cancellation registered - worker will stop processing/retries for this job"
+        }), 200
+
+    except Exception as e:
+        print(f"[CANCEL] Error registering cancellation: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
 
@@ -1194,7 +1287,12 @@ def process_job(job):
 
 def process_video_job(job):
     job_id = job.get("job_id") or job.get("id")
-    
+
+    if is_job_cancelled(job_id):
+        print(f"[CANCELLED] Video job {job_id} was cancelled/updated externally - skipping")
+        unregister_job_cancelled(job_id)
+        return
+
     print(f"\n{'='*70}")
     print(f"PROCESSING VIDEO JOB")
     print(f"{'='*70}")
@@ -1373,6 +1471,11 @@ def process_video_job(job):
             except:
                 pass
         
+        if is_job_cancelled(job_id, check_db=True):
+            print(f"[CANCELLED] Video job {job_id} was cancelled/updated externally - not saving result")
+            unregister_job_cancelled(job_id)
+            return
+
         _video_completed = False
         try:
             complete_response = requests.post(
@@ -1383,6 +1486,10 @@ def process_video_job(job):
             )
             if complete_response.status_code == 200:
                 _video_completed = True
+            elif complete_response.status_code == 409:
+                print(f"[CANCELLED] Backend reports video job {job_id} is already terminal - not overwriting")
+                unregister_job_cancelled(job_id)
+                return
             else:
                 error_msg = f"Failed to mark job complete: {complete_response.status_code} - {complete_response.text[:200]}"
                 print(f"[COMPLETION ERROR] {error_msg}")
@@ -1529,11 +1636,10 @@ def process_video_job(job):
             print(f"[API ERROR] Provider API error detected - attempting key rotation")
             if provider_key in NO_DELETE_ROTATE_PROVIDERS:
                 rr_count = job.get("_rr_rotation_count", 0)
-                total_keys = len(get_all_api_keys_for_provider(provider_key)) if provider_key else 0
-                max_attempts = max(total_keys * 2, 4)
+                max_attempts = MAX_KEY_ROTATION_ATTEMPTS
                 print(f"[RR-ROTATION] No-delete provider '{provider_key}' | attempt {rr_count + 1} of {max_attempts} max")
                 if rr_count >= max_attempts:
-                    print(f"[RR-ROTATION] Max cycles reached for '{provider_key}' - failing job")
+                    print(f"[RR-ROTATION] Max {max_attempts} key rotations reached for '{provider_key}' - failing job completely")
                     mark_job_failed(job_id, "🔄 This model is temporarily unavailable. Please try again later or use a different model.")
                     return
                 rotation_success, next_key = handle_roundrobin_rotation(
@@ -1543,6 +1649,10 @@ def process_video_job(job):
                                    next_key.get("id") if next_key else None,
                                    error_message, rotation_success)
                 if rotation_success and next_key:
+                    if is_job_cancelled(job_id, check_db=True):
+                        print(f"[CANCELLED] Job {job_id} was cancelled/updated externally - stopping retries")
+                        unregister_job_cancelled(job_id)
+                        return
                     job["_rr_rotation_count"] = rr_count + 1
                     job["_rotated_api_key"] = next_key.get("api_key")
                     job["_rotated_api_key_id"] = next_key.get("id")
@@ -1554,6 +1664,13 @@ def process_video_job(job):
                     mark_job_failed(job_id, "🔄 This model is temporarily unavailable. Please try again later or use a different model.")
                     return
             else:
+                # Standard (delete-on-failure) rotation - capped at MAX_KEY_ROTATION_ATTEMPTS
+                std_count = job.get("_std_rotation_count", 0)
+                print(f"[ROTATION] Provider '{provider_key}' | attempt {std_count + 1} of {MAX_KEY_ROTATION_ATTEMPTS} max")
+                if std_count >= MAX_KEY_ROTATION_ATTEMPTS:
+                    print(f"[ROTATION] Max {MAX_KEY_ROTATION_ATTEMPTS} key rotations reached for '{provider_key}' - failing job completely")
+                    mark_job_failed(job_id, "🔄 This model is temporarily unavailable. Please try again later or use a different model.")
+                    return
                 print(f"[ROTATION] Attempting to rotate API key...")
                 rotation_success, next_key = handle_api_key_rotation(
                     api_key_id,
@@ -1566,7 +1683,12 @@ def process_video_job(job):
                                    error_message, rotation_success)
 
                 if rotation_success and next_key:
-                    print(f"[RETRY] Retrying video job with new API key...")
+                    if is_job_cancelled(job_id, check_db=True):
+                        print(f"[CANCELLED] Job {job_id} was cancelled/updated externally - stopping retries")
+                        unregister_job_cancelled(job_id)
+                        return
+                    job["_std_rotation_count"] = std_count + 1
+                    print(f"[RETRY] Retrying video job with new API key (attempt {std_count + 1}/{MAX_KEY_ROTATION_ATTEMPTS})...")
                     return process_video_job(job)
                 else:
                     print(f"[ERROR] API key rotation failed or no keys available")
@@ -1587,7 +1709,12 @@ def process_video_job(job):
 
 def process_image_job(job):
     job_id = job.get("job_id") or job.get("id")
-    
+
+    if is_job_cancelled(job_id):
+        print(f"[CANCELLED] Image job {job_id} was cancelled/updated externally - skipping")
+        unregister_job_cancelled(job_id)
+        return
+
     print(f"\n{'='*70}")
     print(f"PROCESSING IMAGE JOB")
     print(f"{'='*70}")
@@ -1789,6 +1916,11 @@ def process_image_job(job):
             print(f"[Cloudinary] Upload error: {str(upload_error)}")
             raise Exception(f"Cloudinary upload error: {str(upload_error)}")
         
+        if is_job_cancelled(job_id, check_db=True):
+            print(f"[CANCELLED] Image job {job_id} was cancelled/updated externally - not saving result")
+            unregister_job_cancelled(job_id)
+            return
+
         _image_completed = False
         try:
             complete_response = requests.post(
@@ -1799,6 +1931,10 @@ def process_image_job(job):
             )
             if complete_response.status_code == 200:
                 _image_completed = True
+            elif complete_response.status_code == 409:
+                print(f"[CANCELLED] Backend reports image job {job_id} is already terminal - not overwriting")
+                unregister_job_cancelled(job_id)
+                return
             else:
                 error_msg = f"Failed to mark job complete: {complete_response.status_code} - {complete_response.text[:200]}"
                 print(f"[COMPLETION ERROR] {error_msg}")
@@ -1964,16 +2100,14 @@ def process_image_job(job):
             print(f"[API ERROR] Provider API error detected - attempting key rotation")
 
             if provider_key in NO_DELETE_ROTATE_PROVIDERS:
-                # No-delete round-robin rotation with 2-cycle limit (per job)
+                # No-delete round-robin rotation - capped at MAX_KEY_ROTATION_ATTEMPTS (per job)
                 rr_count = job.get("_rr_rotation_count", 0)
-                all_keys = get_all_api_keys_for_provider(provider_key)
-                total_keys = max(len(all_keys), 1)
-                max_attempts = total_keys * 2
+                max_attempts = MAX_KEY_ROTATION_ATTEMPTS
 
                 print(f"[RR-ROTATION] No-delete provider '{provider_key}' | attempt {rr_count + 1} of {max_attempts} max")
 
                 if rr_count >= max_attempts:
-                    print(f"[RR-ROTATION] 2 full cycles completed for '{provider_key}' - failing job")
+                    print(f"[RR-ROTATION] Max {max_attempts} key rotations reached for '{provider_key}' - failing job completely")
                     mark_job_failed(job_id, "🔄 This model is temporarily unavailable. Please try again later or use a different model.")
                     return
 
@@ -1988,6 +2122,10 @@ def process_image_job(job):
                                    error_message, rotation_success)
 
                 if rotation_success and next_key:
+                    if is_job_cancelled(job_id, check_db=True):
+                        print(f"[CANCELLED] Job {job_id} was cancelled/updated externally - stopping retries")
+                        unregister_job_cancelled(job_id)
+                        return
                     job["_rr_rotation_count"] = rr_count + 1
                     job["_rotated_api_key"] = next_key.get("api_key")
                     job["_rotated_api_key_id"] = next_key.get("id")
@@ -2000,7 +2138,13 @@ def process_image_job(job):
                     return
 
             else:
-                # Standard rotation: delete failing key, get next (all other providers unchanged)
+                # Standard rotation: delete failing key, get next - capped at MAX_KEY_ROTATION_ATTEMPTS
+                std_count = job.get("_std_rotation_count", 0)
+                print(f"[ROTATION] Provider '{provider_key}' | attempt {std_count + 1} of {MAX_KEY_ROTATION_ATTEMPTS} max")
+                if std_count >= MAX_KEY_ROTATION_ATTEMPTS:
+                    print(f"[ROTATION] Max {MAX_KEY_ROTATION_ATTEMPTS} key rotations reached for '{provider_key}' - failing job completely")
+                    mark_job_failed(job_id, "🔄 This model is temporarily unavailable. Please try again later or use a different model.")
+                    return
                 print(f"[ROTATION] Attempting to rotate API key...")
                 rotation_success, next_key = handle_api_key_rotation(
                     api_key_id,
@@ -2013,7 +2157,12 @@ def process_image_job(job):
                                    error_message, rotation_success)
 
                 if rotation_success and next_key:
-                    print(f"[RETRY] Retrying image job with new API key...")
+                    if is_job_cancelled(job_id, check_db=True):
+                        print(f"[CANCELLED] Job {job_id} was cancelled/updated externally - stopping retries")
+                        unregister_job_cancelled(job_id)
+                        return
+                    job["_std_rotation_count"] = std_count + 1
+                    print(f"[RETRY] Retrying image job with new API key (attempt {std_count + 1}/{MAX_KEY_ROTATION_ATTEMPTS})...")
                     return process_image_job(job)
                 else:
                     print(f"[ERROR] API key rotation failed or no keys available")

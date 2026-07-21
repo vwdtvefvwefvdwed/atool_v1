@@ -138,9 +138,49 @@ def notify_worker(job_id: str, job_type: str = "image"):
     print(f"[WORKER_NOTIFY] Started background notification thread for job {job_id}")
 
 
+def notify_worker_job_cancelled(job_id: str, status: str = "cancelled"):
+    """
+    Notify the worker service that a job was cancelled/failed/completed externally
+    (user cancel, manual Supabase edit, admin action) so it stops any in-flight
+    processing and key-rotation retries for that job.
+
+    Runs in a background thread so it never blocks the caller.
+    The worker responds via POST /worker/cancel-job (200 = registered).
+    """
+    if not WORKER_URL:
+        print(f"[WORKER_CANCEL] WORKER_URL not set - cannot notify worker about job {job_id}")
+        return
+
+    def _send():
+        cancel_endpoint = f"{WORKER_URL.rstrip('/')}/worker/cancel-job"
+        for attempt in range(1, 4):
+            try:
+                response = requests.post(
+                    cancel_endpoint,
+                    json={"job_id": job_id, "status": status},
+                    timeout=WORKER_NOTIFY_TIMEOUT,
+                    headers={"Content-Type": "application/json"}
+                )
+                if response.status_code == 200:
+                    print(f"[WORKER_CANCEL] ✅ Worker acknowledged cancellation of job {job_id} (status={status})")
+                    return
+                print(f"[WORKER_CANCEL] ⚠️ Worker returned {response.status_code} for job {job_id} (attempt {attempt}/3)")
+            except Exception as e:
+                print(f"[WORKER_CANCEL] ⚠️ Could not notify worker for job {job_id} (attempt {attempt}/3): {e}")
+            time.sleep(5 * attempt)
+        print(f"[WORKER_CANCEL] ❌ All attempts failed for job {job_id} - worker will detect via DB status checks")
+
+    threading.Thread(
+        target=_send,
+        daemon=True,
+        name=f"WorkerCancel-{job_id[:8]}"
+    ).start()
+
+
 def create_job(user_id: str, prompt: str, model: str = "flux-dev", 
                aspect_ratio: str = "1:1", negative_prompt: str = "",
-               job_type: str = "image", duration: int = 5, image_url = None, mask_url: str = None) -> dict:
+               job_type: str = "image", duration: int = 5, image_url = None, mask_url: str = None,
+               extra_metadata: dict = None) -> dict:
     """
     Create a new image/video generation job
     ✅ OPTIMIZED: Can use batch RPC (6 operations → 1 call)
@@ -278,6 +318,15 @@ def create_job(user_id: str, prompt: str, model: str = "flux-dev",
         if mask_url:
             metadata["mask_url"] = mask_url
             print(f"🎭 Added mask URL to job metadata: {mask_url}")
+
+        # Caller-supplied metadata (e.g. workflow jobs record workflow_name,
+        # gallery reference_id/reference_title) — merged last, but never
+        # allowed to clobber the priority key.
+        if extra_metadata and isinstance(extra_metadata, dict):
+            _priority = metadata.get("priority")
+            metadata.update({k: v for k, v in extra_metadata.items() if v is not None})
+            metadata["priority"] = _priority
+            print(f"🧾 Merged extra job metadata keys: {list(extra_metadata.keys())}")
         
         job_data = {
             "user_id": user_id,
@@ -638,7 +687,10 @@ def cancel_job(job_id: str, user_id: str) -> dict:
             "status": "cancelled",
             "completed_at": datetime.utcnow().isoformat()
         }).eq("job_id", job_id).execute()
-        
+
+        # Notify worker so it stops any in-flight generation/retries for this job
+        notify_worker_job_cancelled(job_id, "cancelled")
+
         # Refund credit if job was pending (not started yet)
         if job["status"] == "pending":
             user_response = supabase.table("users").select("credits").eq("id", user_id).execute()

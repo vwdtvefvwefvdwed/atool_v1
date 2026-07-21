@@ -116,7 +116,7 @@ class FifaWorldCupWorkflow(BaseWorkflow):
             'model': model,
             'provider_key': provider,
             'input_image_url': user_face_url,
-            'aspect_ratio': '9:16',
+            'aspect_ratio': self.requested_aspect_ratio or '9:16',
             'job_id': self.job_id
         }
 

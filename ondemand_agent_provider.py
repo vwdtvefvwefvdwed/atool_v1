@@ -291,9 +291,23 @@ def generate_with_ondemand_agent(
 
     # Aspect ratio: the chat orchestrator has no structured size param, so it
     # is passed inside the query text (skipped for the default 1:1).
+    # Verified live (2026-07) with the default agent/endpoint: 16:9 and 3:2
+    # come back pixel-exact, 1:1 exact; extreme portrait (9:16) is clamped by
+    # the image tool to its closest supported size (1024x1536 ≈ 2:3), so
+    # portrait requests are best-effort.
     ratio_hint = ""
     if aspect_ratio and aspect_ratio not in ("1:1", "auto"):
-        ratio_hint = f" The image MUST have a {aspect_ratio} aspect ratio."
+        _orient = ""
+        try:
+            _w, _h = aspect_ratio.split(":")
+            _orient = " (vertical portrait)" if float(_w) < float(_h) else " (horizontal landscape)"
+        except (ValueError, AttributeError):
+            pass
+        ratio_hint = (
+            f" CRITICAL REQUIREMENT: the generated image MUST have a {aspect_ratio}"
+            f" aspect ratio{_orient} — width:height = {aspect_ratio}. Pass"
+            f" aspect_ratio={aspect_ratio} to the image tool if supported."
+        )
 
     # Build the chat-orchestrator query (agentforme-style phrasing).
     if all_urls:

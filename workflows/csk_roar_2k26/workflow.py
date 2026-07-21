@@ -105,7 +105,7 @@ class CskRoar2k26Workflow(BaseWorkflow):
             'provider_key': provider,
             'input_image_url': reference_image_b,      # FIRST = base scene (CSK)
             'reference_image_url': user_face_url,      # SECOND = face identity (user)
-            'aspect_ratio': '1:1',
+            'aspect_ratio': self.requested_aspect_ratio or '1:1',
             'job_id': self.job_id
         }
 

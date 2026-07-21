@@ -330,6 +330,20 @@ class RealtimeConnectionManager:
                     # Dispatch to all clients watching this job
                     self._dispatch_event(job_id, normalized_payload)
 
+                    # Notify the worker service when a job reaches a terminal state
+                    # (completed/failed/cancelled). This covers MANUAL Supabase edits
+                    # and admin updates - the worker stops in-flight processing and
+                    # key-rotation retries for that job instead of generating blindly.
+                    try:
+                        _new_status = new_record.get("status") if isinstance(new_record, dict) else None
+                        _old_status = old_record.get("status") if isinstance(old_record, dict) else None
+                        if _new_status in ("completed", "failed", "cancelled") and _new_status != _old_status:
+                            from jobs import notify_worker_job_cancelled
+                            notify_worker_job_cancelled(job_id, _new_status)
+                            print(f"📣 Notified worker: job {job_id} is now '{_new_status}'")
+                    except Exception as _cancel_err:
+                        print(f"⚠️ Could not notify worker of terminal status for {job_id}: {_cancel_err}")
+
                 except Exception as e:
                     print(f"❌ Error in realtime callback: {e}")
                     import traceback

@@ -54,7 +54,10 @@ class CommonWorkflowWorkflow(BaseWorkflow):
                     "format": 'jpg',
                     "width": None,
                     "height": None,
-                    "gender_version": input_file.get('gender_version')
+                    "gender_version": input_file.get('gender_version'),
+                    # User-requested output ratio (validated in app.py) — the
+                    # On-Demand chat orchestrator honours it via a prompt hint.
+                    "aspect_ratio": input_file.get('aspect_ratio') or '1:1'
                 }
 
             # A bare string is just the uploaded face — run with the default
@@ -68,7 +71,8 @@ class CommonWorkflowWorkflow(BaseWorkflow):
                     "format": 'jpg',
                     "width": None,
                     "height": None,
-                    "gender_version": None
+                    "gender_version": None,
+                    "aspect_ratio": '1:1'
                 }
 
             raise HardError("Gallery Remix requires an uploaded face image")
@@ -131,12 +135,18 @@ class CommonWorkflowWorkflow(BaseWorkflow):
         logger.info(f"Input image (user face/identity): {user_face_url}")
         logger.info(f"Prompt: {prompt[:100]}...")
 
+        # User-requested output ratio (from the upload step; defaults to 1:1).
+        # Verified live (2026-07): the On-Demand chat orchestrator honours the
+        # ratio hint — 1:1 / 16:9 / 3:2 exact; 9:16 clamps to 1024x1536 (≈2:3).
+        aspect_ratio = input_data.get('aspect_ratio') or self.requested_aspect_ratio or '1:1'
+        logger.info(f"Requested aspect ratio: {aspect_ratio}")
+
         generation_params = {
             'prompt': prompt,
             'model': model,
             'provider_key': provider,
             'input_image_url': user_face_url,  # the ONLY image: user identity/base canvas
-            'aspect_ratio': '1:1',
+            'aspect_ratio': aspect_ratio,
             'job_id': self.job_id
         }
 
