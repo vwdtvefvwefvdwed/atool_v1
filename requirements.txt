@@ -23,6 +23,7 @@ mailtrap==2.0.1
 
 # Utilities
 python-dateutil==2.8.2
+psutil>=5.9.0  # process memory metric for /monitor/status
 
 # Image Processing
 Pillow>=10.2.0

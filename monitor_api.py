@@ -123,6 +123,11 @@ class MonitorLogHandler(logging.Handler):
         except Exception:
             return
 
+        # Skip the dashboard's own polling noise (werkzeug access-log lines
+        # for /monitor/* and /health) so real logs are not drowned out.
+        if record.name == "werkzeug" and ("/monitor" in msg or "/health" in msg):
+            return
+
         try:
             entry = {
                 "ts": _now_iso(),

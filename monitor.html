@@ -192,15 +192,23 @@
 
   function el(id){ return document.getElementById(id); }
   function esc(s){ var d=document.createElement("div"); d.textContent = s==null?"":String(s); return d.innerHTML; }
-  function fmtTime(iso){ if(!iso) return "—"; try{ return new Date(iso).toLocaleTimeString(); }catch(e){ return iso; } }
+  function parseDate(iso){
+    // Supabase timestamps carry 6-digit microseconds (.123456+00:00) which
+    // Safari's Date.parse rejects — trim fractional seconds to 3 digits.
+    if(!iso) return null;
+    var d = new Date(String(iso).replace(/\.(\d{3})\d+/, ".$1"));
+    return isNaN(d.getTime()) ? null : d;
+  }
+  function fmtTime(iso){ var d=parseDate(iso); return d ? d.toLocaleTimeString() : (iso||"—"); }
   function fmtUptime(sec){
     if(sec==null) return "—";
     var h=Math.floor(sec/3600), m=Math.floor((sec%3600)/60), s=Math.floor(sec%60);
     return (h?h+"h ":"")+(m?m+"m ":"")+s+"s";
   }
   function elapsed(iso){
-    if(!iso) return "—";
-    var s=(Date.now()-new Date(iso).getTime())/1000;
+    var d=parseDate(iso);
+    if(!d) return "—";
+    var s=(Date.now()-d.getTime())/1000;
     if(s<0) s=0;
     return s>3600 ? (s/3600).toFixed(1)+"h" : s>60 ? (s/60).toFixed(1)+"m" : Math.floor(s)+"s";
   }

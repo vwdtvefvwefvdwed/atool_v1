@@ -40,7 +40,7 @@ import os
 import time
 import threading
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 import requests
@@ -60,6 +60,10 @@ DRAIN_TIMEOUT = int(os.getenv("SMART_RESTART_DRAIN_TIMEOUT", "900"))            
 RESTART_COOLDOWN = int(os.getenv("SMART_RESTART_COOLDOWN", "1800"))             # 30 min between restarts
 DAILY_RESTART_CAP = int(os.getenv("SMART_RESTART_DAILY_CAP", "4"))              # max auto-restarts / UTC day
 WORKER_UNREACHABLE_TOLERANCE = 3   # consecutive failed worker polls => treat worker as down (safe to restart)
+# Running jobs older than this are treated as zombies and EXCLUDED from the
+# drain count (a crashed job stuck at status='running' must not block every
+# future restart forever). Real image/workflow jobs finish in minutes.
+STALE_JOB_HOURS = float(os.getenv("SMART_RESTART_STALE_JOB_HOURS", "2"))
 
 MAINTENANCE_FLAG_FILE = Path(__file__).parent / ".maintenance_mode"
 
@@ -179,6 +183,16 @@ class SmartRestartManager:
             if self._stop_event.is_set():
                 break
             try:
+                # Watchdog: if a restart was triggered but this process is
+                # STILL alive 15 min later, the platform restart failed —
+                # reset to HEALTHY so auto-recovery is not disabled forever.
+                if (self.state == RESTART_TRIGGERED and self.last_restart_at
+                        and time.time() - self.last_restart_at > 900):
+                    print("[SMART-RESTART] Restart triggered 15+ min ago but process "
+                          "still alive — resetting state to HEALTHY")
+                    self._set_maintenance_local(False)
+                    self._set_state(HEALTHY)
+
                 if not self.enabled or self.state != HEALTHY:
                     continue
                 reason, scope = self._check_triggers()
@@ -255,6 +269,12 @@ class SmartRestartManager:
         return True
 
     def _restarts_today(self) -> int:
+        # Cached for 60s — /monitor/status polls every 5s on both services and
+        # must not hammer Supabase with count queries.
+        now = time.time()
+        cached = getattr(self, "_restarts_today_cache", None)
+        if cached is not None and now - cached[0] < 60:
+            return cached[1]
         try:
             from supabase_client import supabase
             today_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00+00:00")
@@ -263,9 +283,11 @@ class SmartRestartManager:
                 .eq("triggered_by", "auto").gte("triggered_at", today_iso)
                 .limit(1).execute()
             )
-            return resp.count or 0
+            count = resp.count or 0
         except Exception:
-            return 0
+            count = cached[1] if cached else 0
+        self._restarts_today_cache = (now, count)
+        return count
 
     def _daily_cap_ok(self) -> bool:
         return self._restarts_today() < DAILY_RESTART_CAP
@@ -363,6 +385,11 @@ class SmartRestartManager:
                     os.getenv("RENDER_WORKER_DEPLOY_HOOK"),
                     label="worker",
                 )
+            else:
+                # Worker is NOT being restarted, so its ephemeral filesystem is
+                # NOT wiped — its .maintenance_mode flag must be cleared
+                # explicitly or it would skip jobs forever.
+                self._set_maintenance_worker(False)
             if scope in ("all", "backend"):
                 ok_backend = self._restart_render_service(
                     os.getenv("RENDER_BACKEND_SERVICE_ID"),
@@ -384,7 +411,19 @@ class SmartRestartManager:
             # Best-effort local cleanup. On Render the ephemeral filesystem is
             # wiped by the restart anyway; this matters for local dev runs.
             self._set_maintenance_local(False)
-            print("[SMART-RESTART] Restart triggered successfully — waiting for platform restart")
+
+            # If THIS process's own service was NOT part of the restart scope,
+            # it keeps running — resume monitoring immediately instead of
+            # waiting for the 15-min watchdog (cooldown prevents re-triggers).
+            own_service_restarted = (
+                (self.role == "backend" and scope in ("all", "backend")) or
+                (self.role == "worker" and scope in ("all", "worker"))
+            )
+            if not own_service_restarted:
+                self._set_state(HEALTHY)
+                print("[SMART-RESTART] Own service not in restart scope — resuming monitoring")
+            else:
+                print("[SMART-RESTART] Restart triggered successfully — waiting for platform restart")
             return True
         except Exception as e:
             print(f"[SMART-RESTART] Sequence error: {e}")
@@ -437,13 +476,39 @@ class SmartRestartManager:
         return False
 
     def _count_running_jobs_db(self) -> int:
+        """Count genuinely-running jobs, excluding zombies stuck at 'running'.
+
+        A crashed job left at status='running' would otherwise block EVERY
+        drain forever (each attempt aborting at the 15-min timeout).
+        """
         try:
             from supabase_client import supabase
             resp = (
-                supabase.table("jobs").select("job_id", count="exact")
-                .eq("status", "running").limit(1).execute()
+                supabase.table("jobs").select("job_id, created_at")
+                .eq("status", "running").limit(100).execute()
             )
-            return resp.count or 0
+            rows = resp.data or []
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=STALE_JOB_HOURS)
+            active = 0
+            stale_ids = []
+            for row in rows:
+                try:
+                    created = datetime.fromisoformat(
+                        str(row.get("created_at", "")).replace("Z", "+00:00")
+                    )
+                    if created.tzinfo is None:
+                        created = created.replace(tzinfo=timezone.utc)
+                    if created >= cutoff:
+                        active += 1
+                    else:
+                        stale_ids.append(row.get("job_id"))
+                except Exception:
+                    # Unparseable timestamp -> count as active (safe side)
+                    active += 1
+            if stale_ids:
+                print(f"[SMART-RESTART] Ignoring {len(stale_ids)} stale 'running' job(s) "
+                      f"older than {STALE_JOB_HOURS}h in drain count: {stale_ids[:5]}")
+            return active
         except Exception as e:
             print(f"[SMART-RESTART] Could not count running jobs: {e}")
             return -1  # unknown => never treated as drained (drain waits/times out)
