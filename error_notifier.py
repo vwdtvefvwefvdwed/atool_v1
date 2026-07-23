@@ -32,6 +32,7 @@ class ErrorType(Enum):
     WORKER_STARTUP_FAILED = ("critical", "fire,warning")
     REALTIME_LISTENER_CRASHED = ("critical", "fire,boom")
     ALL_PROVIDERS_DOWN = ("critical", "fire,x")
+    SMART_RESTART = ("critical", "fire,arrows_counterclockwise")
     
     NO_API_KEY_FOR_PROVIDER = ("api_keys", "key,warning")
     API_KEY_ROTATION_FAILED = ("api_keys", "key,x")

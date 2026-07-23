@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Atool Monitor</title>
+<style>
+  :root{
+    --bg:#0b0e14; --panel:#121722; --panel2:#0e1420; --border:#1f2937;
+    --text:#d7dce4; --muted:#7b8494; --green:#22c55e; --yellow:#eab308;
+    --red:#ef4444; --blue:#3b82f6; --mono:'Consolas','Menlo',monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font:14px/1.45 -apple-system,'Segoe UI',Roboto,sans-serif;padding:14px}
+  h1{font-size:17px;letter-spacing:2px;font-weight:700}
+  .topbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;background:var(--panel);
+    border:1px solid var(--border);border-radius:10px;padding:10px 14px;margin-bottom:14px}
+  .topbar input{background:var(--panel2);border:1px solid var(--border);color:var(--text);
+    border-radius:6px;padding:7px 10px;font-size:13px;min-width:220px}
+  .topbar input:focus{outline:1px solid var(--blue)}
+  button{background:var(--blue);border:0;color:#fff;border-radius:6px;padding:8px 14px;
+    font-size:13px;cursor:pointer;font-weight:600}
+  button:hover{filter:brightness(1.15)}
+  button.warn{background:#b45309}
+  button.danger{background:#b91c1c}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  .grid{display:grid;gap:12px}
+  .cards{grid-template-columns:repeat(auto-fit,minmax(280px,1fr));margin-bottom:12px}
+  .card,.panel{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:12px 14px}
+  .card h3{font-size:12px;text-transform:uppercase;letter-spacing:1.5px;color:var(--muted);
+    margin-bottom:8px;display:flex;align-items:center;gap:8px}
+  .dot{width:10px;height:10px;border-radius:50%;background:var(--muted);display:inline-block;flex:none}
+  .dot.green{background:var(--green);box-shadow:0 0 6px var(--green)}
+  .dot.yellow{background:var(--yellow);box-shadow:0 0 6px var(--yellow)}
+  .dot.red{background:var(--red);box-shadow:0 0 6px var(--red)}
+  .kv{display:grid;grid-template-columns:auto 1fr;gap:2px 12px;font-size:13px}
+  .kv span:nth-child(odd){color:var(--muted)}
+  .kv span:nth-child(even){font-family:var(--mono);text-align:right}
+  .panel h2{font-size:12px;text-transform:uppercase;letter-spacing:1.5px;color:var(--muted);margin-bottom:8px;
+    display:flex;justify-content:space-between;align-items:center;gap:8px}
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  th{color:var(--muted);text-align:left;font-weight:600;padding:4px 8px;border-bottom:1px solid var(--border);
+    text-transform:uppercase;font-size:10.5px;letter-spacing:1px}
+  td{padding:5px 8px;border-bottom:1px solid #161d2b;font-family:var(--mono);vertical-align:top;word-break:break-all}
+  .badge{display:inline-block;padding:1px 7px;border-radius:99px;font-size:10.5px;font-weight:700;letter-spacing:.5px}
+  .b-backend{background:#1e3a8a;color:#bfdbfe}
+  .b-worker{background:#3f2d0c;color:#fde68a}
+  .s-running{color:var(--yellow)} .s-completed{color:var(--green)}
+  .s-failed{color:var(--red)} .s-pending{color:var(--blue)}
+  .two{grid-template-columns:1fr 1fr}
+  @media(max-width:980px){.two{grid-template-columns:1fr}}
+  .logbox{background:#070a10;border:1px solid var(--border);border-radius:6px;height:320px;
+    overflow-y:auto;padding:8px;font-family:var(--mono);font-size:12px;white-space:pre-wrap}
+  .logline{padding:1px 0;border-bottom:1px dotted #131a28}
+  .lv-ERROR,.lv-CRITICAL{color:#f87171}
+  .lv-WARNING{color:#facc15}
+  .lv-INFO{color:#93c5fd}
+  .lv-DEBUG{color:var(--muted)}
+  .l-meta{color:var(--muted)}
+  .empty{color:var(--muted);font-size:13px;padding:10px 4px}
+  .actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  #banner{display:none;background:#450a0a;border:1px solid #7f1d1d;color:#fecaca;border-radius:8px;
+    padding:8px 12px;margin-bottom:12px;font-size:13px}
+  .small{font-size:11.5px;color:var(--muted)}
+  .filter{background:var(--panel2);border:1px solid var(--border);color:var(--text);border-radius:6px;
+    padding:4px 8px;font-size:12px;width:180px}
+  label.chk{font-size:12px;color:var(--muted);display:flex;gap:5px;align-items:center;cursor:pointer}
+  .mt{margin-top:12px}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <h1>ATOOL&nbsp;MONITOR</h1>
+  <input id="cfg-backend" placeholder="Backend URL (https://atool-backend.onrender.com)">
+  <input id="cfg-worker"  placeholder="Worker URL (https://atool-worker.onrender.com)">
+  <input id="cfg-token"   placeholder="Monitor token" type="password">
+  <button id="btn-connect">Connect</button>
+  <span id="conn-state" class="small">not connected</span>
+</div>
+
+<div id="banner"></div>
+
+<div class="grid cards">
+  <div class="card" id="card-backend">
+    <h3><span class="dot" id="dot-backend"></span>Backend</h3>
+    <div class="kv" id="kv-backend"><span>status</span><span>—</span></div>
+  </div>
+  <div class="card" id="card-worker">
+    <h3><span class="dot" id="dot-worker"></span>Worker</h3>
+    <div class="kv" id="kv-worker"><span>status</span><span>—</span></div>
+  </div>
+  <div class="card" id="card-realtime">
+    <h3><span class="dot" id="dot-realtime"></span>Realtime / Smart Restart</h3>
+    <div class="kv" id="kv-realtime"><span>ws</span><span>—</span></div>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>Running Jobs <span class="small" id="jobs-meta"></span></h2>
+  <table><thead><tr>
+    <th>Job ID</th><th>Type</th><th>Model</th><th>User</th><th>Created</th><th>Elapsed</th><th>Step</th>
+  </tr></thead><tbody id="tb-running"></tbody></table>
+  <div class="empty" id="empty-running">No running jobs</div>
+</div>
+
+<div class="grid two mt">
+  <div class="panel">
+    <h2>Completed (last 20)</h2>
+    <table><thead><tr><th>Job ID</th><th>Type</th><th>Model</th><th>Created</th></tr></thead>
+    <tbody id="tb-completed"></tbody></table>
+    <div class="empty" id="empty-completed">—</div>
+  </div>
+  <div class="panel">
+    <h2>Failed / Errors (last 20)</h2>
+    <table><thead><tr><th>Job ID</th><th>Model</th><th>Error</th><th>Created</th></tr></thead>
+    <tbody id="tb-failed"></tbody></table>
+    <div class="empty" id="empty-failed">—</div>
+  </div>
+</div>
+
+<div class="panel mt">
+  <h2>Live Log Stream (backend + worker)
+    <span style="display:flex;gap:10px;align-items:center">
+      <input class="filter" id="log-filter" placeholder="filter…">
+      <label class="chk"><input type="checkbox" id="log-autoscroll" checked>auto-scroll</label>
+      <label class="chk"><input type="checkbox" id="log-errors-only">errors only</label>
+    </span>
+  </h2>
+  <div class="logbox" id="logbox"></div>
+</div>
+
+<div class="grid two mt">
+  <div class="panel">
+    <h2>Recent Requests</h2>
+    <table><thead><tr><th>Svc</th><th>Method</th><th>Path</th><th>Status</th><th>ms</th><th>Time</th></tr></thead>
+    <tbody id="tb-requests"></tbody></table>
+    <div class="empty" id="empty-requests">—</div>
+  </div>
+  <div class="panel">
+    <h2>Restart History</h2>
+    <table><thead><tr><th>When</th><th>Scope</th><th>By</th><th>Reason</th></tr></thead>
+    <tbody id="tb-restarts"></tbody></table>
+    <div class="empty" id="empty-restarts">—</div>
+  </div>
+</div>
+
+<div class="panel mt">
+  <h2>Actions</h2>
+  <div class="actions">
+    <button class="warn" id="btn-maint-on">Enable Maintenance (both)</button>
+    <button id="btn-maint-off">Disable Maintenance (both)</button>
+    <button class="danger" id="btn-restart">Drain + Restart All</button>
+    <span class="small">Restart drains all running jobs first, then restarts both Render deploys. It never kills running jobs.</span>
+  </div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  var cfg = {backend:"", worker:"", token:""};
+  var timers = [];
+  var logs = [];            // merged log entries {svc, ts, level, logger, message}
+  var logKeys = {};         // dedupe
+  var MAX_LOGS = 800;
+
+  // ── config persistence ──
+  function loadCfg(){
+    try{
+      cfg.backend = localStorage.getItem("mon_backend") || "";
+      cfg.worker  = localStorage.getItem("mon_worker")  || "";
+      cfg.token   = localStorage.getItem("mon_token")   || "";
+    }catch(e){}
+    el("cfg-backend").value = cfg.backend;
+    el("cfg-worker").value  = cfg.worker;
+    el("cfg-token").value   = cfg.token;
+    // When served from the backend itself, prefill backend URL
+    if(!cfg.backend && location.protocol.indexOf("http") === 0){
+      el("cfg-backend").value = location.origin;
+    }
+  }
+  function saveCfg(){
+    cfg.backend = el("cfg-backend").value.trim().replace(/\/+$/,"");
+    cfg.worker  = el("cfg-worker").value.trim().replace(/\/+$/,"");
+    cfg.token   = el("cfg-token").value.trim();
+    try{
+      localStorage.setItem("mon_backend", cfg.backend);
+      localStorage.setItem("mon_worker",  cfg.worker);
+      localStorage.setItem("mon_token",   cfg.token);
+    }catch(e){}
+  }
+
+  function el(id){ return document.getElementById(id); }
+  function esc(s){ var d=document.createElement("div"); d.textContent = s==null?"":String(s); return d.innerHTML; }
+  function fmtTime(iso){ if(!iso) return "—"; try{ return new Date(iso).toLocaleTimeString(); }catch(e){ return iso; } }
+  function fmtUptime(sec){
+    if(sec==null) return "—";
+    var h=Math.floor(sec/3600), m=Math.floor((sec%3600)/60), s=Math.floor(sec%60);
+    return (h?h+"h ":"")+(m?m+"m ":"")+s+"s";
+  }
+  function elapsed(iso){
+    if(!iso) return "—";
+    var s=(Date.now()-new Date(iso).getTime())/1000;
+    if(s<0) s=0;
+    return s>3600 ? (s/3600).toFixed(1)+"h" : s>60 ? (s/60).toFixed(1)+"m" : Math.floor(s)+"s";
+  }
+  function shortId(id){ return id ? String(id).slice(0,8) : "—"; }
+
+  function api(base, path){
+    return fetch(base+path, {headers:{"Authorization":"Bearer "+cfg.token}})
+      .then(function(r){
+        if(r.status===401) throw new Error("bad token");
+        if(!r.ok) throw new Error("HTTP "+r.status);
+        return r.json();
+      });
+  }
+  function apiPost(base, path, body){
+    return fetch(base+path, {
+      method:"POST",
+      headers:{"Authorization":"Bearer "+cfg.token,"Content-Type":"application/json"},
+      body: JSON.stringify(body||{})
+    }).then(function(r){ return r.json().then(function(j){ j._http=r.status; return j; }); });
+  }
+
+  function banner(msg){
+    var b = el("banner");
+    if(!msg){ b.style.display="none"; return; }
+    b.style.display="block"; b.textContent = msg;
+  }
+
+  // ── status cards ──
+  function setDot(id, color){ el(id).className = "dot "+(color||""); }
+  function kv(id, pairs){
+    el(id).innerHTML = pairs.map(function(p){
+      return "<span>"+esc(p[0])+"</span><span>"+p[1]+"</span>";
+    }).join("");
+  }
+
+  function renderServiceCard(role, st, err){
+    var dotId = "dot-"+role, kvId = "kv-"+role;
+    if(err || !st){
+      setDot(dotId, "red");
+      kv(kvId, [["status","<span class='s-failed'>UNREACHABLE</span>"],
+                ["error", esc(err ? String(err.message||err) : "no data")]]);
+      return;
+    }
+    var maint = st.maintenance_mode;
+    var sr = st.smart_restart || {};
+    var busyState = sr.state && sr.state !== "HEALTHY";
+    setDot(dotId, (maint||busyState) ? "yellow" : "green");
+    var rows = [
+      ["status", maint ? "<span class='s-pending'>MAINTENANCE</span>" : "<span class='s-completed'>healthy</span>"],
+      ["uptime", esc(fmtUptime(st.uptime_seconds))],
+      ["memory", st.memory_mb!=null ? esc(st.memory_mb+" MB") : "—"],
+      ["active jobs", esc(st.active_jobs)]
+    ];
+    var ex = st.extra || {};
+    if(role==="worker"){
+      if(ex.jobs_processed!=null) rows.push(["processed", esc(ex.jobs_processed)]);
+      if(ex.ready!=null) rows.push(["ready", esc(ex.ready)]);
+      if(ex.last_heartbeat) rows.push(["heartbeat", esc(fmtTime(ex.last_heartbeat))]);
+    }
+    kv(kvId, rows);
+  }
+
+  function renderRealtimeCard(backendSt, workerSt){
+    if(!backendSt){ setDot("dot-realtime","red"); kv("kv-realtime",[["ws","<span class='s-failed'>unknown</span>"]]); return; }
+    var rt = backendSt.realtime || {};
+    var sr = backendSt.smart_restart || {};
+    var wsr = (workerSt && workerSt.smart_restart) || {};
+    var loop = sr.detected || wsr.detected;
+    var busy = sr.state && sr.state !== "HEALTHY";
+    setDot("dot-realtime", loop ? "red" : busy ? "yellow" : (rt.running ? "green" : "yellow"));
+    kv("kv-realtime", [
+      ["ws", loop ? "<span class='s-failed'>1001-LOOP</span>"
+                  : rt.running ? "<span class='s-completed'>CONNECTED</span>"
+                  : "<span class='s-pending'>starting</span>"],
+      ["last event", rt.last_event_age_seconds!=null ? esc(rt.last_event_age_seconds+"s ago") : "—"],
+      ["1001 (5m) be/wk", esc((sr.errors_1001_window!=null?sr.errors_1001_window:"?")+" / "+(wsr.errors_1001_window!=null?wsr.errors_1001_window:"?"))],
+      ["restart state", "<span class='"+(busy?"s-pending":"s-completed")+"'>"+esc(sr.state||"—")+"</span>"],
+      ["cooldown", sr.cooldown_remaining_seconds ? esc(sr.cooldown_remaining_seconds+"s") : "—"],
+      ["restarts today", esc((sr.restarts_today!=null?sr.restarts_today:"?")+" / "+(sr.daily_cap!=null?sr.daily_cap:"?"))],
+      ["auto-restart", sr.enabled ? "<span class='s-completed'>enabled</span>" : "<span class='s-failed'>disabled</span>"]
+    ]);
+  }
+
+  var lastBackendSt = null, lastWorkerSt = null;
+  function pollStatus(){
+    if(cfg.backend){
+      api(cfg.backend, "/monitor/status")
+        .then(function(st){ lastBackendSt=st; renderServiceCard("backend", st); renderRealtimeCard(lastBackendSt,lastWorkerSt); banner(""); })
+        .catch(function(e){ lastBackendSt=null; renderServiceCard("backend", null, e); renderRealtimeCard(null,lastWorkerSt);
+          if(String(e.message)==="bad token") banner("Invalid monitor token for backend."); });
+    }
+    if(cfg.worker){
+      api(cfg.worker, "/monitor/status")
+        .then(function(st){ lastWorkerSt=st; renderServiceCard("worker", st); renderRealtimeCard(lastBackendSt,lastWorkerSt); })
+        .catch(function(e){ lastWorkerSt=null; renderServiceCard("worker", null, e); });
+    }
+  }
+
+  // ── jobs ──
+  function pollJobs(){
+    if(!cfg.backend) return;
+    api(cfg.backend, "/monitor/jobs").then(function(j){
+      el("jobs-meta").textContent = "running: "+j.running_count+" · pending: "+j.pending_count+
+        " · today ✓"+(j.today&&j.today.completed!=null?j.today.completed:"?")+
+        " ✗"+(j.today&&j.today.failed!=null?j.today.failed:"?");
+      var run = j.running||[];
+      el("tb-running").innerHTML = run.map(function(x){
+        return "<tr><td>"+esc(shortId(x.job_id))+"</td><td>"+esc(x.job_type||"—")+"</td><td>"+esc(x.model||"—")+
+          "</td><td>"+esc(shortId(x.user_id))+"</td><td>"+esc(fmtTime(x.created_at))+"</td><td>"+esc(elapsed(x.created_at))+
+          "</td><td>"+esc(x.current_step||x.workflow_step||"—")+"</td></tr>";
+      }).join("");
+      el("empty-running").style.display = run.length ? "none" : "block";
+
+      var comp = j.completed_recent||[];
+      el("tb-completed").innerHTML = comp.map(function(x){
+        return "<tr><td class='s-completed'>"+esc(shortId(x.job_id))+"</td><td>"+esc(x.job_type||"—")+
+          "</td><td>"+esc(x.model||"—")+"</td><td>"+esc(fmtTime(x.created_at))+"</td></tr>";
+      }).join("");
+      el("empty-completed").style.display = comp.length ? "none" : "block";
+
+      var fail = j.failed_recent||[];
+      el("tb-failed").innerHTML = fail.map(function(x){
+        return "<tr><td class='s-failed'>"+esc(shortId(x.job_id))+"</td><td>"+esc(x.model||"—")+
+          "</td><td>"+esc(x.error||"—")+"</td><td>"+esc(fmtTime(x.created_at))+"</td></tr>";
+      }).join("");
+      el("empty-failed").style.display = fail.length ? "none" : "block";
+    }).catch(function(){ /* card already shows unreachable */ });
+  }
+
+  // ── logs (merged) ──
+  function ingestLogs(svc, items){
+    (items||[]).forEach(function(it){
+      var key = svc+"|"+it.ts+"|"+it.message;
+      if(logKeys[key]) return;
+      logKeys[key] = 1;
+      logs.push({svc:svc, ts:it.ts, level:it.level, logger:it.logger, message:it.message});
+    });
+    logs.sort(function(a,b){ return a.ts<b.ts?-1:a.ts>b.ts?1:0; });
+    if(logs.length>MAX_LOGS){
+      logs.splice(0, logs.length-MAX_LOGS);
+      logKeys = {};
+      logs.forEach(function(l){ logKeys[l.svc+"|"+l.ts+"|"+l.message]=1; });
+    }
+    renderLogs();
+  }
+  function renderLogs(){
+    var f = el("log-filter").value.toLowerCase();
+    var errOnly = el("log-errors-only").checked;
+    var box = el("logbox");
+    var html = logs.filter(function(l){
+      if(errOnly && l.level!=="ERROR" && l.level!=="CRITICAL") return false;
+      if(f && (l.message+" "+l.logger+" "+l.svc).toLowerCase().indexOf(f)<0) return false;
+      return true;
+    }).map(function(l){
+      var b = l.svc==="backend" ? "b-backend" : "b-worker";
+      return "<div class='logline'><span class='badge "+b+"'>"+(l.svc==="backend"?"BE":"WK")+"</span> "+
+        "<span class='l-meta'>"+esc(fmtTime(l.ts))+"</span> "+
+        "<span class='lv-"+esc(l.level)+"'>"+esc(l.level)+"</span> "+
+        "<span class='l-meta'>"+esc(l.logger)+"</span> "+esc(l.message)+"</div>";
+    }).join("");
+    box.innerHTML = html || "<div class='empty'>no logs yet</div>";
+    if(el("log-autoscroll").checked) box.scrollTop = box.scrollHeight;
+  }
+  function pollLogs(){
+    if(cfg.backend) api(cfg.backend,"/monitor/logs?limit=200").then(function(r){ ingestLogs("backend", r.items); }).catch(function(){});
+    if(cfg.worker)  api(cfg.worker, "/monitor/logs?limit=200").then(function(r){ ingestLogs("worker",  r.items); }).catch(function(){});
+  }
+
+  // ── requests + restart history ──
+  function pollRequests(){
+    var rows = [];
+    var pending = 0;
+    function done(){
+      pending--;
+      if(pending>0) return;
+      rows.sort(function(a,b){ return a.ts<b.ts?1:-1; });
+      rows = rows.slice(0,60);
+      el("tb-requests").innerHTML = rows.map(function(r){
+        var b = r.svc==="backend" ? "b-backend" : "b-worker";
+        var cls = r.status>=500?"s-failed":r.status>=400?"s-pending":"s-completed";
+        return "<tr><td><span class='badge "+b+"'>"+(r.svc==="backend"?"BE":"WK")+"</span></td><td>"+esc(r.method)+
+          "</td><td>"+esc(r.path)+"</td><td class='"+cls+"'>"+esc(r.status)+"</td><td>"+esc(r.duration_ms!=null?r.duration_ms:"—")+
+          "</td><td>"+esc(fmtTime(r.ts))+"</td></tr>";
+      }).join("");
+      el("empty-requests").style.display = rows.length ? "none" : "block";
+    }
+    ["backend","worker"].forEach(function(svc){
+      var base = cfg[svc]; if(!base) return;
+      pending++;
+      api(base,"/monitor/requests?limit=60").then(function(r){
+        (r.items||[]).forEach(function(it){ it.svc=svc; rows.push(it); });
+      }).catch(function(){}).finally(done);
+    });
+  }
+  function pollRestartHistory(){
+    if(!cfg.backend) return;
+    api(cfg.backend,"/monitor/restart-history").then(function(r){
+      var items = r.items||[];
+      el("tb-restarts").innerHTML = items.map(function(x){
+        return "<tr><td>"+esc(fmtTime(x.triggered_at))+" <span class='l-meta'>"+esc((x.triggered_at||"").slice(0,10))+
+          "</span></td><td>"+esc(x.service||"—")+"</td><td>"+esc(x.triggered_by||"—")+"</td><td>"+esc(x.reason||"—")+"</td></tr>";
+      }).join("");
+      el("empty-restarts").style.display = items.length ? "none" : "block";
+    }).catch(function(){});
+  }
+
+  // ── actions ──
+  function setMaintenance(enable){
+    var targets = [];
+    if(cfg.backend) targets.push(["backend", cfg.backend]);
+    if(cfg.worker)  targets.push(["worker",  cfg.worker]);
+    targets.forEach(function(t){
+      apiPost(t[1], "/monitor/maintenance", {enable:enable}).then(function(r){
+        console.log("maintenance", t[0], r);
+      }).catch(function(e){ banner("Maintenance toggle failed on "+t[0]+": "+e.message); });
+    });
+    setTimeout(pollStatus, 800);
+  }
+
+  function triggerRestart(){
+    if(!cfg.backend){ banner("Backend URL required for restart"); return; }
+    if(!confirm("Drain all running jobs, then RESTART BOTH Render deploys?\n\nNew jobs are blocked while draining. Running jobs are never killed.")) return;
+    apiPost(cfg.backend, "/monitor/restart", {scope:"all", force:false}).then(function(r){
+      if(r.success) banner("");
+      alert(r.message || JSON.stringify(r));
+      pollStatus();
+    }).catch(function(e){ banner("Restart request failed: "+e.message); });
+  }
+
+  // ── wiring ──
+  function connect(){
+    saveCfg();
+    if(!cfg.token){ banner("Enter the monitor token."); return; }
+    if(!cfg.backend && !cfg.worker){ banner("Enter at least one service URL."); return; }
+    banner("");
+    el("conn-state").textContent = "polling…";
+    timers.forEach(clearInterval); timers = [];
+    logs = []; logKeys = {};
+    // immediate first load (completed/failed shown as soon as page connects)
+    pollStatus(); pollJobs(); pollLogs(); pollRequests(); pollRestartHistory();
+    timers.push(setInterval(pollStatus, 5000));
+    timers.push(setInterval(pollJobs, 10000));
+    timers.push(setInterval(pollLogs, 10000));
+    timers.push(setInterval(pollRequests, 10000));
+    timers.push(setInterval(pollRestartHistory, 30000));
+  }
+
+  el("btn-connect").addEventListener("click", connect);
+  el("btn-maint-on").addEventListener("click", function(){ setMaintenance(true); });
+  el("btn-maint-off").addEventListener("click", function(){ setMaintenance(false); });
+  el("btn-restart").addEventListener("click", triggerRestart);
+  el("log-filter").addEventListener("input", renderLogs);
+  el("log-errors-only").addEventListener("change", renderLogs);
+  [ "cfg-backend","cfg-worker","cfg-token" ].forEach(function(id){
+    el(id).addEventListener("keydown", function(ev){ if(ev.key==="Enter") connect(); });
+  });
+
+  loadCfg();
+  if(cfg.token && (cfg.backend||cfg.worker)) connect();
+})();
+</script>
+</body>
+</html>

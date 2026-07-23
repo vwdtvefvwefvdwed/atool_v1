@@ -57,6 +57,18 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_ANON_KEY")
 VERIFY_SSL = os.getenv("VERIFY_SSL", "False").lower() == "true"
 
+# Monitor API + Smart Restart (report-only role on the worker).
+# Exposes /monitor/* endpoints incl. active_jobs gauge used by the backend's
+# drain-and-restart orchestrator. See docs/SMART_RESTART_AND_MONITOR_PLAN.md
+try:
+    from monitor_api import init_monitor
+    from smart_restart import init_smart_restart
+    init_monitor(app, "worker", extra_status_fn=lambda: dict(worker_status))
+    init_smart_restart("worker")
+    print("[STARTUP] Monitor API initialized on worker (role=worker)")
+except Exception as _mon_err:
+    print(f"[STARTUP] Monitor API NOT initialized on worker: {_mon_err}")
+
 # Maximum number of MAIN API-key rotation attempts per job (applies to ALL providers,
 # both no-delete round-robin and delete-on-failure rotation, for image AND video jobs).
 # After this many key rotations the job is failed completely.
@@ -1126,7 +1138,22 @@ def process_job_with_concurrency_control(job):
         return None
 
     try:
-        return _process_job_with_concurrency_control_inner(job)
+        # Track in-flight jobs for the monitor's active_jobs gauge (used by
+        # the smart-restart drain check on the backend)
+        try:
+            from monitor_api import job_started, job_finished
+            job_started()
+            _gauge_active = True
+        except Exception:
+            _gauge_active = False
+        try:
+            return _process_job_with_concurrency_control_inner(job)
+        finally:
+            if _gauge_active:
+                try:
+                    job_finished()
+                except Exception:
+                    pass
     finally:
         _job_thread_semaphore.release()
 

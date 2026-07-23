@@ -135,6 +135,18 @@ try:
 except Exception as _ui_err:
     print(f"[STARTUP] Adaptive UI blueprint NOT registered: {_ui_err}")
 
+# Monitor API + Smart Auto-Restart (1001 recovery). Isolated observability
+# layer; safe to fail without affecting the generation pipeline.
+# See docs/SMART_RESTART_AND_MONITOR_PLAN.md
+try:
+    from monitor_api import init_monitor
+    from smart_restart import init_smart_restart
+    init_monitor(app, "backend")
+    init_smart_restart("backend")
+    print("[STARTUP] Monitor API + Smart Restart initialized (dashboard at /monitor)")
+except Exception as _mon_err:
+    print(f"[STARTUP] Monitor API NOT initialized: {_mon_err}")
+
 
 def _require_env(name: str) -> str:
     value = os.getenv(name)

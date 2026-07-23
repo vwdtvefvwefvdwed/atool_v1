@@ -22,6 +22,23 @@ services:
       # printed by:  python -m envvault encrypt backend/.env --environment production
       - key: DOTENV_KEY
         sync: false  # Value: dotenv://:key_<64-hex>@dotenv.org/vault/.env.vault?environment=production
+      # ── Monitor + Smart Auto-Restart (docs/SMART_RESTART_AND_MONITOR_PLAN.md) ──
+      - key: MONITOR_TOKEN
+        sync: false  # Bearer token for /monitor/* endpoints (falls back to ADMIN_SECRET)
+      - key: SMART_RESTART_ENABLED
+        value: "true"  # Kill-switch for automatic 1001 drain-and-restart
+      - key: RENDER_API_KEY
+        sync: false  # Render API key used to restart the deploys
+      - key: RENDER_BACKEND_SERVICE_ID
+        sync: false  # srv-... ID of atool-backend
+      - key: RENDER_WORKER_SERVICE_ID
+        sync: false  # srv-... ID of atool-worker
+      - key: RENDER_BACKEND_DEPLOY_HOOK
+        sync: false  # Optional fallback: deploy hook URL for atool-backend
+      - key: RENDER_WORKER_DEPLOY_HOOK
+        sync: false  # Optional fallback: deploy hook URL for atool-worker
+      # WORKER_URL must also be set (usually via .env.vault):
+      # https://atool-worker.onrender.com — used for job push AND monitor coordination
     healthCheckPath: /health
     autoDeploy: true  # Auto-deploy on git push
 
@@ -50,4 +67,11 @@ services:
       # PostgreSQL connection for LISTEN/NOTIFY (more stable than Realtime WebSocket)
       - key: DATABASE_URL
         sync: false  # Get from: Supabase Dashboard -> Settings -> Database -> Connection string (Session mode, port 5432). NOT 6543!
+      # ── Monitor + Smart Auto-Restart (docs/SMART_RESTART_AND_MONITOR_PLAN.md) ──
+      # Same MONITOR_TOKEN as the web service — the backend calls this worker's
+      # /monitor/* endpoints during drain, and the dashboard polls it directly.
+      - key: MONITOR_TOKEN
+        sync: false
+      - key: SMART_RESTART_ENABLED
+        value: "true"  # Worker runs in report-only mode (backend orchestrates)
     autoDeploy: true
